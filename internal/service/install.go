@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -201,7 +202,20 @@ func Install(opts Options) error {
 	}
 	fmt.Printf("Wrote config: %s\n", configPath)
 
-	usesGnomeKeyringBackend := opts.BackendPath == "gnome-keyring" || opts.BackendPath == "gnome-keyring-daemon"
+	var dbusDaemon, backendCommand string
+	usesGnomeKeyringBackend := false
+	if mode == "local" || mode == "full" {
+		var lpErr error
+		dbusDaemon, lpErr = lookPathFunc("dbus-daemon")
+		if lpErr != nil {
+			return fmt.Errorf("find dbus-daemon: %w", lpErr)
+		}
+		backendCommand, lpErr = resolveBackendCommand(opts.BackendPath)
+		if lpErr != nil {
+			return lpErr
+		}
+		usesGnomeKeyringBackend = isGnomeKeyringBackend(opts.BackendPath, backendCommand)
+	}
 
 	// Mask/unmask D-Bus activation based on mode.
 	switch mode {
@@ -213,7 +227,9 @@ func Install(opts Options) error {
 			if err := saveGnomeKeyringState(); err != nil {
 				return err
 			}
-			maskPublicGnomeKeyringUnits()
+			if err := maskPublicGnomeKeyringUnits(); err != nil {
+				return err
+			}
 		}
 		stopDBusActivatedService()
 	case "remote":
@@ -226,24 +242,19 @@ func Install(opts Options) error {
 	}
 
 	// Build unit file contents for this mode.
-	execStart := self + " serve --config " + configPath
+	execStart, err := systemdExecStart(self, "serve", "--config", configPath)
+	if err != nil {
+		return err
+	}
 	needed := make(map[string]string)
 
 	switch mode {
 	case "remote":
 		needed[unitFileName] = fmt.Sprintf(unitTemplate, execStart)
 	case "local", "full":
-		dbusDaemon, lpErr := lookPathFunc("dbus-daemon")
-		if lpErr != nil {
-			return fmt.Errorf("find dbus-daemon: %w", lpErr)
-		}
-		backendPath, lpErr := resolveBackendCommand(opts.BackendPath)
-		if lpErr != nil {
-			return lpErr
-		}
 		needed["secrets-dispatcher-bus.socket"] = busSocketTemplate
 		needed["secrets-dispatcher-bus.service"] = fmt.Sprintf(busServiceTemplate, dbusDaemon)
-		needed["secrets-dispatcher-backend.service"] = fmt.Sprintf(backendServiceTemplate, backendPath)
+		needed["secrets-dispatcher-backend.service"] = fmt.Sprintf(backendServiceTemplate, backendCommand)
 		needed[unitFileName] = fmt.Sprintf(localProxyTemplate, execStart)
 	}
 
@@ -434,16 +445,102 @@ func resolveBackendCommand(backend string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("find gopass-secret-service: %w", err)
 		}
-		return path, nil
+		return systemdExecStart(path)
 	case "gnome-keyring", "gnome-keyring-daemon":
 		path, err := lookPathFunc("gnome-keyring-daemon")
 		if err != nil {
 			return "", fmt.Errorf("find gnome-keyring-daemon: %w", err)
 		}
-		return path + " --foreground --components=secrets --control-directory=%t/keyring-dispatcher-backend", nil
+		return systemdExecStartAllowSpecifiers(path, "--foreground", "--components=secrets", "--control-directory=%t/keyring-dispatcher-backend")
 	default:
+		if err := validateUnitLine("backend command", backend); err != nil {
+			return "", err
+		}
 		return backend, nil
 	}
+}
+
+func isGnomeKeyringBackend(original, resolved string) bool {
+	for _, command := range []string{original, resolved} {
+		name := firstCommandWord(command)
+		if name == "" {
+			continue
+		}
+		if slices.Contains([]string{"gnome-keyring", "gnome-keyring-daemon"}, name) || filepath.Base(name) == "gnome-keyring-daemon" {
+			return true
+		}
+	}
+	return false
+}
+
+func firstCommandWord(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	if command[0] != '"' {
+		return strings.Fields(command)[0]
+	}
+	var b strings.Builder
+	escaped := false
+	for _, r := range command[1:] {
+		if escaped {
+			b.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			return b.String()
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func systemdExecStart(args ...string) (string, error) {
+	return systemdExecStartWithSpecifiers(false, args...)
+}
+
+func systemdExecStartAllowSpecifiers(args ...string) (string, error) {
+	return systemdExecStartWithSpecifiers(true, args...)
+}
+
+func systemdExecStartWithSpecifiers(allowSpecifiers bool, args ...string) (string, error) {
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		q, err := quoteSystemdArg(arg, allowSpecifiers)
+		if err != nil {
+			return "", err
+		}
+		quoted = append(quoted, q)
+	}
+	return strings.Join(quoted, " "), nil
+}
+
+func quoteSystemdArg(arg string, allowSpecifiers bool) (string, error) {
+	if err := validateUnitLine("ExecStart argument", arg); err != nil {
+		return "", err
+	}
+	if !allowSpecifiers {
+		arg = strings.ReplaceAll(arg, "%", "%%")
+	}
+	if arg != "" && !strings.ContainsAny(arg, " \t\\\"") {
+		return arg, nil
+	}
+	arg = strings.ReplaceAll(arg, `\`, `\\`)
+	arg = strings.ReplaceAll(arg, `"`, `\"`)
+	return `"` + arg + `"`, nil
+}
+
+func validateUnitLine(name, value string) error {
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("invalid %s: contains a newline", name)
+	}
+	return nil
 }
 
 func gnomeKeyringStatePath() (string, error) {
@@ -564,12 +661,12 @@ func restoreGnomeKeyringUnit(unit gnomeKeyringUnitState) error {
 	return nil
 }
 
-func maskPublicGnomeKeyringUnits() {
+func maskPublicGnomeKeyringUnits() error {
 	if err := systemctlFunc("mask", "--now", "gnome-keyring-daemon.service", "gnome-keyring-daemon.socket"); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to mask public GNOME Keyring units: %v\n", err)
-		return
+		return fmt.Errorf("mask public GNOME Keyring units: %w", err)
 	}
 	fmt.Println("Masked public GNOME Keyring units")
+	return nil
 }
 
 // dbusServiceDir returns the user D-Bus service directory.
