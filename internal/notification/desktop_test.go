@@ -192,7 +192,7 @@ func TestHandler_OnEvent_RequestCreated_Actions(t *testing.T) {
 	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: req})
 
 	call := mock.lastNotify()
-	wantActions := []string{"default", "", "approve", "Approve", "approve_and_auto_approve", "Approve 2m", "deny", "Deny"}
+	wantActions := []string{"default", "", "approve", "Approve", "approve_and_auto_approve", "Approve similar", "deny", "Deny"}
 	if len(call.actions) != len(wantActions) {
 		t.Fatalf("expected %d actions, got %d: %v", len(wantActions), len(call.actions), call.actions)
 	}
@@ -200,6 +200,9 @@ func TestHandler_OnEvent_RequestCreated_Actions(t *testing.T) {
 		if call.actions[i] != a {
 			t.Errorf("action[%d]: want %q, got %q", i, a, call.actions[i])
 		}
+	}
+	if !contains(call.body, "Approve similar: allow matching requests for 2m") {
+		t.Errorf("body should explain Approve similar duration: %s", call.body)
 	}
 }
 
@@ -928,12 +931,12 @@ func TestHandler_DelayedNotification_CancelledAfterShown(t *testing.T) {
 		t.Fatalf("expected 1 notification after delay, got %d", mock.notifyCount())
 	}
 
-	// Cancel after notification was shown — should close + show follow-up.
+	// Cancel after notification was shown — should close it without showing a
+	// confusing follow-up auto-approve prompt.
 	h.OnEvent(approval.Event{Type: approval.EventRequestCancelled, Request: req})
 
-	// Original closed (1 close) + follow-up sent (2 notifies total).
-	if mock.notifyCount() != 2 {
-		t.Errorf("expected 2 notifications (original + follow-up), got %d", mock.notifyCount())
+	if mock.notifyCount() != 1 {
+		t.Errorf("expected no follow-up notification, got %d notifications", mock.notifyCount())
 	}
 	if mock.closeCount() != 1 {
 		t.Errorf("expected 1 close call for original notification, got %d", mock.closeCount())

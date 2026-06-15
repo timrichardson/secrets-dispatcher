@@ -309,20 +309,12 @@ type Handler struct {
 	requests      map[uint32]string // notification ID -> request ID (reverse)
 	pending       *delayGroup       // notifications waiting for the grace period
 
-	// cancelledRequests stores recently cancelled requests for auto-approve lookup.
-	// Keys are request IDs, values expire after 5 minutes.
-	cancelledRequests map[string]cancelledEntry
-}
-
-type cancelledEntry struct {
-	request   *approval.Request
-	expiresAt time.Time
 }
 
 // NewHandler creates a notification handler.
 // baseURL is the web UI URL opened when the user clicks the notification body.
-// autoApproveDuration controls the label shown on the "Approve Nm" button and
-// the body text of the post-timeout auto-approve notification.
+// autoApproveDuration controls the explanatory text for the "Approve similar"
+// button.
 // notificationDelay is the grace period before showing a desktop notification;
 // requests cancelled within this window produce no notification at all.
 func NewHandler(notifier Notifier, approver Approver, baseURL string, showPIDs bool, autoApproveDuration, notificationDelay time.Duration) *Handler {
@@ -337,7 +329,6 @@ func NewHandler(notifier Notifier, approver Approver, baseURL string, showPIDs b
 		notifications:       make(map[string]uint32),
 		requests:            make(map[uint32]string),
 		pending:             newDelayGroup(),
-		cancelledRequests:   make(map[string]cancelledEntry),
 	}
 }
 
@@ -467,11 +458,13 @@ func (h *Handler) handleCreated(req *approval.Request) {
 func (h *Handler) sendNotification(req *approval.Request) {
 	summary, icon := h.notificationMeta(req)
 	body := h.formatBody(req)
-	durLabel := formatDurationShort(h.autoApproveDuration)
+	if h.autoApproveDuration > 0 {
+		body += "\nApprove similar: allow matching requests for " + formatDurationShort(h.autoApproveDuration)
+	}
 	actions := []string{
 		"default", "",
 		"approve", "Approve",
-		"approve_and_auto_approve", "Approve " + durLabel,
+		"approve_and_auto_approve", "Approve similar",
 		"deny", "Deny",
 	}
 
@@ -492,10 +485,12 @@ func (h *Handler) sendNotification(req *approval.Request) {
 func (h *Handler) handleCancelled(req *approval.Request) {
 	if h.pending.Cancel(req.ID) {
 		slog.Debug("suppressed notification for quickly-cancelled request", "request_id", req.ID)
-		return // no notification was shown, skip the follow-up too
+		return
 	}
 
-	// Close the original approval notification
+	// Close the original approval notification if it was already shown. Do not
+	// show a follow-up auto-approve prompt; users can now choose "Approve similar"
+	// on the original notification or pending request card when they want that.
 	h.mu.Lock()
 	notifID, ok := h.notifications[req.ID]
 	if ok {
@@ -509,43 +504,6 @@ func (h *Handler) handleCancelled(req *approval.Request) {
 			slog.Debug("failed to close notification", "error", err, "notification_id", notifID)
 		}
 	}
-
-	// Store the cancelled request for auto-approve lookup
-	h.mu.Lock()
-	h.cancelledRequests[req.ID] = cancelledEntry{
-		request:   req,
-		expiresAt: time.Now().Add(5 * time.Minute),
-	}
-	// Clean expired entries
-	now := time.Now()
-	for id, entry := range h.cancelledRequests {
-		if entry.expiresAt.Before(now) {
-			delete(h.cancelledRequests, id)
-		}
-	}
-	h.mu.Unlock()
-
-	// Send a follow-up "Auto-approve?" notification
-	invoker := req.SenderInfo.InvokerName
-	if invoker == "" {
-		invoker = "client"
-	}
-	summary := fmt.Sprintf("%s timed out", invoker)
-	body := fmt.Sprintf("Auto-approve similar requests for %s?", formatDurationShort(h.autoApproveDuration))
-	actions := []string{"auto_approve", "Auto-approve", "dismiss", "Dismiss"}
-
-	newID, err := h.notifier.Notify(summary, body, "dialog-question", actions)
-	if err != nil {
-		slog.Error("failed to send auto-approve notification", "error", err, "request_id", req.ID)
-		return
-	}
-
-	h.mu.Lock()
-	h.notifications[req.ID] = newID
-	h.requests[newID] = req.ID
-	h.mu.Unlock()
-
-	slog.Debug("sent auto-approve notification", "request_id", req.ID, "notification_id", newID)
 }
 
 func (h *Handler) handleResolved(requestID string) {
