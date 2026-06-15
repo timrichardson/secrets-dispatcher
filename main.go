@@ -919,7 +919,7 @@ func printServiceUsage() {
 
 Commands:
   install       Install and enable the systemd user service
-  uninstall     Stop, disable, and remove the systemd user service
+  uninstall     Stop, disable, and remove the systemd user service; restore saved GNOME Keyring/D-Bus state
   status        Show the service status
 
 Install options:

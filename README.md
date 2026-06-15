@@ -92,9 +92,12 @@ The preset:
 
 - runs GNOME Keyring behind the private dispatcher D-Bus as:
   `gnome-keyring-daemon --foreground --components=secrets --control-directory=%t/keyring-dispatcher-backend`
+- saves the pre-existing GNOME Keyring user-unit enabled/active state in
+  `~/.config/secrets-dispatcher/gnome-keyring-units.pre-dispatcher.yaml`
 - masks the public GNOME Keyring user service/socket so they do not steal the
   `org.freedesktop.secrets` name on login
-- masks user D-Bus activation for `org.freedesktop.secrets`
+- masks user D-Bus activation for `org.freedesktop.secrets`, backing up any
+  existing user override as `org.freedesktop.secrets.service.pre-dispatcher`
 
 Verify the public bus owner:
 
@@ -104,6 +107,28 @@ busctl --user list | grep org.freedesktop.secrets
 ```
 
 If GNOME Keyring appears as the owner, desktop apps are bypassing the proxy.
+
+To undo the local proxy setup and restore the previous GNOME Keyring state:
+
+```bash
+secrets-dispatcher service uninstall
+```
+
+Uninstall removes dispatcher user units, removes/restores the user D-Bus
+activation override, and restores the saved GNOME Keyring unit state instead of
+assuming defaults. If you switch back to remote mode, the same restoration is
+also attempted:
+
+```bash
+secrets-dispatcher service install --mode remote --start
+```
+
+After undoing, verify GNOME Keyring can own the public bus name again:
+
+```bash
+systemctl --user is-enabled gnome-keyring-daemon.service gnome-keyring-daemon.socket
+busctl --user list | grep org.freedesktop.secrets
+```
 
 
 ### Git Commit Signing
