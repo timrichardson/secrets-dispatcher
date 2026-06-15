@@ -579,6 +579,42 @@ func TestInstallLocalExplicitBackendPath(t *testing.T) {
 	}
 }
 
+func TestInstallLocalGnomeKeyringBackendPreset(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+
+	calls := mockSystemctl(t)
+	mockExecOutput(t, noopExecOutput)
+	mockLookPath(t, func(name string) (string, error) {
+		switch name {
+		case "dbus-daemon":
+			return "/usr/bin/dbus-daemon", nil
+		case "gnome-keyring-daemon":
+			return "/usr/bin/gnome-keyring-daemon", nil
+		default:
+			return "", fmt.Errorf("not found: %s", name)
+		}
+	})
+
+	if err := Install(Options{Mode: "local", BackendPath: "gnome-keyring"}); err != nil {
+		t.Fatalf("Install() error: %v", err)
+	}
+
+	dir := filepath.Join(tmpDir, "systemd", "user")
+	content, _ := os.ReadFile(filepath.Join(dir, "secrets-dispatcher-backend.service"))
+	s := string(content)
+	if !strings.Contains(s, "ExecStart=/usr/bin/gnome-keyring-daemon --foreground --components=secrets --control-directory=%t/keyring-dispatcher-backend") {
+		t.Errorf("should use GNOME Keyring backend preset, got:\n%s", s)
+	}
+
+	callStr := strings.Join(*calls, "\n")
+	if !strings.Contains(callStr, "mask --now gnome-keyring-daemon.service gnome-keyring-daemon.socket") {
+		t.Errorf("should mask public GNOME Keyring units, calls:\n%s", callStr)
+	}
+}
+
 // --- error cases ---
 
 func TestInstallBackendNotFound(t *testing.T) {

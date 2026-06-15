@@ -161,6 +161,9 @@ func (n *DBusNotifier) Notify(summary, body, icon string, actions []string) (uin
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	// Approval notifications are actionable security prompts. Ask the notification
+	// server not to auto-expire them; otherwise GNOME may hide the Approve/Deny
+	// buttons before the request timeout has elapsed.
 	id, err := n.doNotify(summary, body, icon, actions, 2) // urgency: critical
 	if err != nil && errors.Is(err, dbus.ErrClosed) {
 		if reconnErr := n.reconnect(); reconnErr != nil {
@@ -172,7 +175,7 @@ func (n *DBusNotifier) Notify(summary, body, icon string, actions []string) (uin
 }
 
 func (n *DBusNotifier) doNotify(summary, body, icon string, actions []string, urgency byte) (uint32, error) {
-	return n.doNotifyFull(summary, body, icon, actions, urgency, -1)
+	return n.doNotifyFull(summary, body, icon, actions, urgency, 0)
 }
 
 func (n *DBusNotifier) doNotifyFull(summary, body, icon string, actions []string, urgency byte, expireTimeout int32) (uint32, error) {
