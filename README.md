@@ -60,7 +60,6 @@ make build && make install   # installs to ~/.local/bin
 ```
 
 ### Secret Access Control (local)
-
 ```bash
 # Start the daemon
 secrets-dispatcher serve &
@@ -74,6 +73,38 @@ secrets-dispatcher login
 # Now any secret access triggers an approval prompt
 secret-tool lookup service smtp   # → you'll see a notification
 ```
+
+#### Ubuntu/GNOME local mode
+
+On GNOME desktops (including Ubuntu 26.04 / GNOME 50), GNOME Keyring is often
+started as the public `org.freedesktop.secrets` provider by systemd user units
+and D-Bus activation. For local desktop interception, `secrets-dispatcher` must
+own the public bus name and GNOME Keyring must run only as the private upstream
+backend.
+
+Use the GNOME Keyring backend preset:
+
+```bash
+secrets-dispatcher service install --mode local --backend gnome-keyring --start
+```
+
+The preset:
+
+- runs GNOME Keyring behind the private dispatcher D-Bus as:
+  `gnome-keyring-daemon --foreground --components=secrets --control-directory=%t/keyring-dispatcher-backend`
+- masks the public GNOME Keyring user service/socket so they do not steal the
+  `org.freedesktop.secrets` name on login
+- masks user D-Bus activation for `org.freedesktop.secrets`
+
+Verify the public bus owner:
+
+```bash
+busctl --user list | grep org.freedesktop.secrets
+# expected owner process: secrets-dispatcher
+```
+
+If GNOME Keyring appears as the owner, desktop apps are bypassing the proxy.
+
 
 ### Git Commit Signing
 
@@ -205,7 +236,7 @@ serve:
   timeout: 5m                      # approval request timeout
   approval_window: 2s              # batch concurrent requests
   notification_delay: 1s           # suppress short-lived requests
-  notifications: true              # desktop notifications
+  notifications: true              # desktop notifications; approval prompts request no auto-expiry
   ignore_chrome_dummy_secret: true # suppress Chrome's probe
   rules: []                        # trust rules (see above)
   trusted_signers: []              # GPG signing auto-approve

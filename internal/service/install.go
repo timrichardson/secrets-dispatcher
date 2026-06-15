@@ -96,7 +96,8 @@ type Options struct {
 	Start bool
 	// Mode selects the topology: "remote", "local", or "full" (default: "remote").
 	Mode string
-	// BackendPath overrides the backend binary path (for local/full modes).
+	// BackendPath overrides the backend command for local/full modes.
+	// Special values: "gnome-keyring" or "gnome-keyring-daemon" use a GNOME Keyring preset.
 	BackendPath string
 }
 
@@ -174,11 +175,16 @@ func Install(opts Options) error {
 	}
 	fmt.Printf("Wrote config: %s\n", configPath)
 
+	usesGnomeKeyringBackend := opts.BackendPath == "gnome-keyring" || opts.BackendPath == "gnome-keyring-daemon"
+
 	// Mask/unmask D-Bus activation based on mode.
 	switch mode {
 	case "local", "full":
 		if err := maskDBusActivation(); err != nil {
 			return err
+		}
+		if usesGnomeKeyringBackend {
+			maskPublicGnomeKeyringUnits()
 		}
 		stopDBusActivatedService()
 	case "remote":
@@ -199,12 +205,9 @@ func Install(opts Options) error {
 		if lpErr != nil {
 			return fmt.Errorf("find dbus-daemon: %w", lpErr)
 		}
-		backendPath := opts.BackendPath
-		if backendPath == "" {
-			backendPath, lpErr = lookPathFunc("gopass-secret-service")
-			if lpErr != nil {
-				return fmt.Errorf("find gopass-secret-service: %w", lpErr)
-			}
+		backendPath, lpErr := resolveBackendCommand(opts.BackendPath)
+		if lpErr != nil {
+			return lpErr
 		}
 		needed["secrets-dispatcher-bus.socket"] = busSocketTemplate
 		needed["secrets-dispatcher-bus.service"] = fmt.Sprintf(busServiceTemplate, dbusDaemon)
@@ -386,6 +389,33 @@ func systemctlExec(args ...string) error {
 		return fmt.Errorf("systemctl %s: %w", args[0], err)
 	}
 	return nil
+}
+
+func resolveBackendCommand(backend string) (string, error) {
+	switch backend {
+	case "":
+		path, err := lookPathFunc("gopass-secret-service")
+		if err != nil {
+			return "", fmt.Errorf("find gopass-secret-service: %w", err)
+		}
+		return path, nil
+	case "gnome-keyring", "gnome-keyring-daemon":
+		path, err := lookPathFunc("gnome-keyring-daemon")
+		if err != nil {
+			return "", fmt.Errorf("find gnome-keyring-daemon: %w", err)
+		}
+		return path + " --foreground --components=secrets --control-directory=%t/keyring-dispatcher-backend", nil
+	default:
+		return backend, nil
+	}
+}
+
+func maskPublicGnomeKeyringUnits() {
+	if err := systemctlFunc("mask", "--now", "gnome-keyring-daemon.service", "gnome-keyring-daemon.socket"); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to mask public GNOME Keyring units: %v\n", err)
+		return
+	}
+	fmt.Println("Masked public GNOME Keyring units")
 }
 
 // dbusServiceDir returns the user D-Bus service directory.

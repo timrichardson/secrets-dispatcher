@@ -34,6 +34,7 @@ type Proxy struct {
 	service           *Service
 	collection        *CollectionHandler
 	item              *ItemHandler
+	prompt            *PromptHandler
 	subtreeProperties *SubtreePropertiesHandler
 	signals           *signalForwarder
 }
@@ -93,6 +94,7 @@ func (p *Proxy) ConnectWith(frontConn, backendConn *dbus.Conn) error {
 	p.service = NewService(p.backendConn, p.sessions, p.logger, p.approval, p.clientName, p.tracker, p.resolver, p.upstreamNotifier, p.upstreamSlowThreshold)
 	p.collection = NewCollectionHandler(p.backendConn, p.sessions, p.logger, p.approval, p.clientName, p.tracker, p.resolver, p.upstreamNotifier, p.upstreamSlowThreshold)
 	p.item = NewItemHandler(p.backendConn, p.sessions, p.logger, p.approval, p.clientName, p.tracker, p.resolver, p.upstreamNotifier, p.upstreamSlowThreshold)
+	p.prompt = NewPromptHandler(p.backendConn, p.logger)
 	p.subtreeProperties = NewSubtreePropertiesHandler(p.backendConn, p.sessions, p.logger)
 
 	// Export interfaces on the front connection (where clients call us)
@@ -129,6 +131,12 @@ func (p *Proxy) ConnectWith(frontConn, backendConn *dbus.Conn) error {
 			p.Close()
 			return fmt.Errorf("export Item subtree at %s: %w", prefix, err)
 		}
+	}
+
+	// Forward Secret Service prompt objects returned by backends for unlock/create/delete flows.
+	if err := p.frontConn.ExportSubtree(p.prompt, dbus.ObjectPath("/org/freedesktop/secrets/prompt"), dbustypes.PromptInterface); err != nil {
+		p.Close()
+		return fmt.Errorf("export Prompt subtree: %w", err)
 	}
 
 	// Request the bus name on the front connection
