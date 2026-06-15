@@ -340,23 +340,24 @@
       class="btn-approve"
       onclick={handleApprove}
       disabled={loading !== null}
+      title="Approve only this request"
     >
       {#if loading === "approve"}
         Approving...
       {:else}
-        Approve
+        Approve once
       {/if}
     </button>
     <button
       class="btn-approve-auto"
       onclick={handleApproveAndAutoApprove}
       disabled={loading !== null}
-      title="Approve and auto-approve similar requests for {formatDurationShort(autoApproveDurationSeconds)}"
+      title="Approve this request and matching future requests for {formatDurationShort(autoApproveDurationSeconds)}"
     >
       {#if loading === "approve_auto"}
-        Approving...
+        Approving similar...
       {:else}
-        Approve {formatDurationShort(autoApproveDurationSeconds)}
+        Approve similar
       {/if}
     </button>
     <button class="btn-deny" onclick={handleDeny} disabled={loading !== null}>
@@ -367,6 +368,9 @@
       {/if}
     </button>
   </div>
+  <p class="action-help">
+    “Approve similar” also allows matching requests for {formatDurationShort(autoApproveDurationSeconds)}.
+  </p>
 </div>
 
 <style>
@@ -575,6 +579,12 @@
   .actions {
     display: flex;
     gap: 12px;
+  }
+
+  .action-help {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--color-text-muted);
   }
 
   /* GPG sign card styles */

@@ -152,7 +152,11 @@
   </div>
   <PropsTable {...historyEntryProps(entry.request)} />
   {#if entry.resolution === "cancelled"}
-    <button class="btn-auto-approve" onclick={() => onAutoApprove(entry.request.id)}>{hasMatchingRule(entry) ? "Reset auto-approve timer" : "Auto-approve similar"}</button>
+    <button
+      class="btn-auto-approve"
+      title="Create or refresh a temporary rule for future requests like this"
+      onclick={() => onAutoApprove(entry.request.id)}
+    >{hasMatchingRule(entry) ? "Refresh similar rule" : "Allow future similar"}</button>
   {/if}
 </li>
 
