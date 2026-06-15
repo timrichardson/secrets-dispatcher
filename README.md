@@ -130,6 +130,17 @@ systemctl --user is-enabled gnome-keyring-daemon.service gnome-keyring-daemon.so
 busctl --user list | grep org.freedesktop.secrets
 ```
 
+If you installed or masked GNOME Keyring manually before this state backup existed,
+there may be no `gnome-keyring-units.pre-dispatcher.yaml` to restore from. In that
+case, manually undo the public GNOME Keyring masks and re-enable the default
+Ubuntu/GNOME user units:
+
+```bash
+systemctl --user unmask gnome-keyring-daemon.service gnome-keyring-daemon.socket
+systemctl --user enable gnome-keyring-daemon.service gnome-keyring-daemon.socket
+systemctl --user start gnome-keyring-daemon.socket
+```
+
 
 ### Git Commit Signing
 
