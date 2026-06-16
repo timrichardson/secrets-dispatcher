@@ -169,6 +169,21 @@ Approve or deny requests through any of:
 
 All three update in real-time — approve via notification and the web UI reflects it instantly.
 
+### Approve Similar
+
+`Approve similar` approves the current request and creates a temporary auto-approve rule, valid for `serve.auto_approve_duration` (default: 2 minutes). It is intended for short retry windows, for example when a tool repeats the same Secret Service request after timing out.
+
+For Secret Service requests, "similar" means all of these match:
+
+- same resolved invoker name
+- same request type, such as `get_secret`, `search`, `write`, `delete`, or `unlock`
+- same collection, when the request has a secret item path
+- same secret attributes, or the same search attributes for search requests
+
+If you choose `Save rule` after `Approve similar`, secrets-dispatcher promotes that temporary rule into a saved approval rule. Saved approval rules are stored in the state directory as `approval-rules.json`, survive restarts, and remain active until disabled or deleted in the Web UI. Configured `deny` and `ignore` trust rules still take precedence over saved approval rules.
+
+Auto-approved requests appear in history as `auto_approved`. When a saved, temporary, or config rule caused the request to be approved, denied, or ignored, history includes the rule source, action, name, and ID where available.
+
 ## Trust Rules
 
 Auto-approve known-safe patterns instead of prompting for every request. Add to `~/.config/secrets-dispatcher/config.yaml`:

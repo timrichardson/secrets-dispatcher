@@ -334,6 +334,47 @@ func TestFormatHistory_CollectionColumn(t *testing.T) {
 	mustContain(t, buf.String(), "login")
 }
 
+func TestFormatHistory_RuleAttributionColumn(t *testing.T) {
+	entries := []HistoryEntry{
+		{
+			Request: PendingRequest{
+				ID:    "abc",
+				Items: []ItemInfo{{Label: "X"}},
+				Rule:  &RuleAttribution{Source: "config_rule", Action: "deny", RuleName: "deny-browser"},
+			},
+			Resolution: "denied",
+			ResolvedAt: time.Now(),
+		},
+	}
+
+	var buf strings.Builder
+	f := NewFormatter(&buf, false)
+	if err := f.FormatHistory(entries); err != nil {
+		t.Fatalf("FormatHistory failed: %v", err)
+	}
+
+	out := buf.String()
+	mustContain(t, out, "RULE")
+	mustContain(t, out, "config_rule:deny-brow")
+}
+
+func TestFormatShowResult_RuleAttribution(t *testing.T) {
+	var buf strings.Builder
+	f := NewFormatter(&buf, false)
+	if err := f.FormatShowResult(&ShowResult{
+		Request: PendingRequest{
+			ID:   "abc",
+			Rule: &RuleAttribution{Source: "config_rule", Action: "ignore", RuleName: "ignore-browser"},
+		},
+		Resolution: "ignored",
+		ResolvedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("FormatShowResult failed: %v", err)
+	}
+
+	mustContain(t, buf.String(), "Rule:    config_rule:ignore-browser")
+}
+
 func TestCommitSubject(t *testing.T) {
 	tests := []struct {
 		msg  string

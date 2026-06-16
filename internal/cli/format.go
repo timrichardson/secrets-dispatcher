@@ -109,6 +109,9 @@ func (f *Formatter) FormatShowResult(result *ShowResult) error {
 	f.formatRequest(&result.Request)
 	if result.Resolution != "" {
 		fmt.Fprintf(f.w, "Result:  %s\n", result.Resolution)
+		if rule := requestRuleAttribution(&result.Request); rule != nil {
+			fmt.Fprintf(f.w, "Rule:    %s\n", formatRuleAttribution(rule))
+		}
 		fmt.Fprintf(f.w, "Resolved: %s (%s)\n", result.ResolvedAt.Format(time.RFC3339), formatAgo(result.ResolvedAt))
 	}
 	return nil
@@ -237,8 +240,8 @@ func (f *Formatter) FormatHistory(entries []HistoryEntry) error {
 	}
 
 	// Print header
-	fmt.Fprintf(f.w, "%-8s  %-20s  %7s  %5s  %-12s  %-15s  %-10s  %-20s  %s\n", "ID", "CLIENT", "PID", "UID", "TYPE", "COLLECTION", "RESULT", "SUMMARY", "RESOLVED")
-	fmt.Fprintf(f.w, "%-8s  %-20s  %7s  %5s  %-12s  %-15s  %-10s  %-20s  %s\n", "--------", "--------------------", "-------", "-----", "------------", "---------------", "----------", "--------------------", "--------")
+	fmt.Fprintf(f.w, "%-8s  %-20s  %7s  %5s  %-12s  %-15s  %-10s  %-22s  %-20s  %s\n", "ID", "CLIENT", "PID", "UID", "TYPE", "COLLECTION", "RESULT", "RULE", "SUMMARY", "RESOLVED")
+	fmt.Fprintf(f.w, "%-8s  %-20s  %7s  %5s  %-12s  %-15s  %-10s  %-22s  %-20s  %s\n", "--------", "--------------------", "-------", "-----", "------------", "---------------", "----------", "----------------------", "--------------------", "--------")
 
 	for _, entry := range entries {
 		id := truncate(entry.Request.ID, 8)
@@ -251,12 +254,37 @@ func (f *Formatter) FormatHistory(entries []HistoryEntry) error {
 			coll = "-"
 		}
 		resolution := truncate(entry.Resolution, 10)
+		rule := truncate(formatRuleAttribution(requestRuleAttribution(&entry.Request)), 22)
 		secret := truncate(requestSummary(entry.Request), 20)
 		ago := formatAgo(entry.ResolvedAt)
 
-		fmt.Fprintf(f.w, "%-8s  %-20s  %7s  %5s  %-12s  %-15s  %-10s  %-20s  %s\n", id, client, pid, uid, reqType, coll, resolution, secret, ago)
+		fmt.Fprintf(f.w, "%-8s  %-20s  %7s  %5s  %-12s  %-15s  %-10s  %-22s  %-20s  %s\n", id, client, pid, uid, reqType, coll, resolution, rule, secret, ago)
 	}
 	return nil
+}
+
+func requestRuleAttribution(req *PendingRequest) *RuleAttribution {
+	if req.Rule != nil {
+		return req.Rule
+	}
+	return req.AutoApproval
+}
+
+func formatRuleAttribution(info *RuleAttribution) string {
+	if info == nil {
+		return "-"
+	}
+	label := info.Source
+	if info.RuleName != "" {
+		label = info.RuleName
+	}
+	if info.RuleID != "" {
+		return fmt.Sprintf("%s:%s (%s)", info.Source, label, truncate(info.RuleID, 8))
+	}
+	if label != info.Source {
+		return fmt.Sprintf("%s:%s", info.Source, label)
+	}
+	return label
 }
 
 func formatAgo(t time.Time) string {
