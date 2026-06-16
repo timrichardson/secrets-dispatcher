@@ -28,16 +28,14 @@ type ProvisionConfig struct {
 }
 
 var (
-	geteuidFunc      = os.Geteuid
-	userLookupFunc   = user.Lookup
-	userAddFunc      = defaultUserAdd
-	mkdirAllFunc     = os.MkdirAll
-	chownFunc        = os.Lchown
-	chmodFunc        = os.Chmod
-	writeFileFunc    = os.WriteFile
-	systemctlFunc    = defaultSystemctl
-	executableFunc   = os.Executable
-	evalSymlinksFunc = filepath.EvalSymlinks
+	geteuidFunc    = os.Geteuid
+	userLookupFunc = user.Lookup
+	userAddFunc    = defaultUserAdd
+	mkdirAllFunc   = os.MkdirAll
+	chownFunc      = os.Lchown
+	chmodFunc      = os.Chmod
+	writeFileFunc  = os.WriteFile
+	systemctlFunc  = defaultSystemctl
 )
 
 func (c *ProvisionConfig) defaults() {
@@ -98,6 +96,15 @@ func Provision(cfg ProvisionConfig) error {
 	if err := ensureBackendDirs(homeDir, uid, gid); err != nil {
 		return err
 	}
+	if err := ensureRootDir(DefaultSecureConfigBase, 0755); err != nil {
+		return err
+	}
+	if err := ensureRootDir(DefaultSecureStateBase, 0755); err != nil {
+		return err
+	}
+	if err := ensureRootDir(filepath.Join(DefaultSecureStateBase, cfg.DesktopUser), 0700); err != nil {
+		return err
+	}
 	if err := writeSecureSystemUnit(cfg); err != nil {
 		return err
 	}
@@ -120,11 +127,26 @@ func ensureBackendUser(username, homeDir string) error {
 	return nil
 }
 
+func ensureRootDir(path string, mode os.FileMode) error {
+	if err := mkdirAllFunc(path, mode); err != nil {
+		return fmt.Errorf("create root-owned dir %s: %w", path, err)
+	}
+	if err := chownFunc(path, 0, 0); err != nil {
+		return fmt.Errorf("chown root-owned dir %s: %w", path, err)
+	}
+	if err := chmodFunc(path, mode); err != nil {
+		return fmt.Errorf("chmod root-owned dir %s: %w", path, err)
+	}
+	return nil
+}
+
 func ensureBackendDirs(homeDir string, uid, gid int) error {
 	dirs := []string{
 		homeDir,
 		filepath.Join(homeDir, ".config"),
 		filepath.Join(homeDir, ".cache"),
+		filepath.Join(homeDir, ".local"),
+		filepath.Join(homeDir, ".local", "share"),
 		filepath.Join(homeDir, ".local", "share", "keyrings"),
 	}
 	for _, dir := range dirs {
@@ -146,10 +168,12 @@ func writeSecureSystemUnit(cfg ProvisionConfig) error {
 		BinaryPath string
 		HomeBase   string
 		Provider   string
+		StateBase  string
 	}{
 		BinaryPath: cfg.BinaryPath,
 		HomeBase:   cfg.HomeBase,
 		Provider:   cfg.Provider,
+		StateBase:  DefaultSecureStateBase,
 	}
 	tmpl, err := template.New("secure-unit").Parse(secureSystemUnitTemplate)
 	if err != nil {
@@ -229,7 +253,7 @@ After=systemd-user-sessions.service
 
 [Service]
 Type=simple
-ExecStart={{.BinaryPath}} secure-launch --user %i --backend {{.Provider}} --backend-home-base {{.HomeBase}}
+ExecStart={{.BinaryPath}} secure-launch --user %i --backend {{.Provider}} --backend-home-base {{.HomeBase}} --config ` + DefaultSecureConfigBase + `/%i.yaml
 Restart=on-failure
 RestartSec=5
 
@@ -238,6 +262,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
+ReadWritePaths=/run/secrets-dispatcher {{.HomeBase}} {{.StateBase}}
 
 [Install]
 WantedBy=multi-user.target

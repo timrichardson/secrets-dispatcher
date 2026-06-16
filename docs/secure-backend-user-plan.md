@@ -10,8 +10,8 @@ In this mode:
 - Secrets Dispatcher remains the policy/UI proxy seen by desktop apps.
 - A pluggable Secret Service backend runs as a separate backend Linux user, not as the desktop user.
 - GNOME Keyring is the first and only planned backend implementation for the initial version.
-- Root-managed systemd starts the backend, creates the private backend transport, and passes the backend connection capability only to the proxy process it starts.
-- The proxy prompts the logged-in desktop user when the backend needs human authentication to unlock.
+- Root-managed systemd starts the backend, creates the private backend transport, and keeps the backend connection capability inside the trusted broker it starts.
+- The trusted broker will eventually prompt the logged-in desktop user when the backend needs human authentication to unlock.
 - Multiple logged-in users get isolated per-user proxy/backend instances.
 
 ## Non-Goals
@@ -32,7 +32,7 @@ Secure mode is intentionally scoped to modern Linux desktops with:
 - logind-style runtime directories under `/run/user/<uid>`.
 - a user session D-Bus for desktop apps.
 - Secret Service clients using `org.freedesktop.secrets`.
-- Unix domain sockets, FD passing, and kernel peer credentials (`SCM_RIGHTS`, `SO_PEERCRED`).
+- Unix domain sockets and kernel peer credentials (`SO_PEERCRED`).
 - A modern kernel with standard cross-UID process and filesystem protections.
 
 This is expected to be portable across mainstream systemd Linux distributions, but it is not intended to support non-systemd init systems in secure mode.
@@ -54,8 +54,19 @@ The new mode does not fully prevent that attacker from:
 - Making requests through the public Secret Service proxy.
 - Tricking the human user into approving a request.
 - Interacting with the desktop session as the logged-in user.
+- Reading secret values after they are delivered to an approved same-UID app.
 - Attacking user-owned browser/session state.
 - Denying service by killing user processes or flooding requests.
+
+## Security Boundaries
+
+Backend UID separation is the hard boundary. It protects the backend user's keyring files, backend process memory, and private backend D-Bus from direct access by malware running as the desktop Linux user.
+
+The trusted broker is a mediation boundary, not a kernel-enforced chokepoint for every same-UID action on the desktop session. It provides policy checks, audit history, rate limiting, and blast-radius reduction by forwarding only approved operations to the backend. If a secret is approved and delivered to a desktop-user process, same-UID malware may still be able to read it from that process or its user-owned state.
+
+Owning `org.freedesktop.secrets` on the desktop user's session bus is a compatibility rendezvous. A same-UID attacker may be able to race the public bus name, unmask public activation, or present a competing service. Those attacks are denial-of-service, phishing, or alternate-empty-keyring risks; they must not grant direct access to the backend user's store.
+
+Caller attribution from D-Bus sender names, process IDs, `/proc`, command names, working directories, and systemd unit names is advisory under a same-UID attacker. Durable rules may use these signals to reduce prompts, but they should not be documented as strong identity proofs unless the rule also relies on a stronger trust root.
 
 ## Mode Name
 
@@ -77,14 +88,16 @@ For each desktop user:
 ```text
 desktop apps
   -> user session D-Bus org.freedesktop.secrets
-  -> Secrets Dispatcher proxy running as desktop user
-  -> inherited private backend FD
-  -> root/backend-owned backend bridge
+  -> Secrets Dispatcher trusted broker running from root-managed systemd
   -> private backend D-Bus
   -> Secret Service backend running as backend user
+
+desktop UI agent running as desktop user
+  -> notifications/browser integration
+  -> narrow IPC to trusted broker
 ```
 
-The public side remains compatible with ordinary Secret Service clients. The private side is not reachable through a filesystem socket that arbitrary desktop-user processes can open.
+The public side remains compatible with ordinary Secret Service clients. The private side is not reachable through a filesystem socket or inherited file descriptor that arbitrary desktop-user processes can open or steal.
 
 ## Per-User Isolation
 
@@ -123,45 +136,32 @@ The launcher is responsible for:
 3. Creating a private runtime directory not searchable by the desktop user.
 4. Starting a private backend D-Bus daemon as the backend user.
 5. Starting `gnome-keyring-daemon --foreground --components=secrets` as the backend user on that private bus.
-6. Creating an inherited backend connection FD for the proxy.
-7. Starting the proxy as the desktop user from a root-owned binary path.
-8. Supervising all child processes and shutting them down together.
+6. Running the trusted broker/proxy outside the desktop user's UID boundary.
+7. Connecting the trusted broker to the desktop user's session bus and the private backend bus.
+8. Keeping approval/auth state in root-owned secure-local state.
+9. Supervising all child processes and shutting them down together.
 
 This keeps the trust decision in root-owned unit files and root-owned executable paths, not in a request that arbitrary desktop-user processes can make.
 
-## Backend Connection FD
+## Trusted Broker
 
-Add a new upstream type for the proxy:
-
-```yaml
-serve:
-  upstream:
-    type: inherited_fd
-```
-
-The launcher sets an environment variable such as:
-
-```text
-SECRETS_DISPATCHER_BACKEND_FD=3
-```
-
-The proxy builds a D-Bus connection from that FD instead of dialing a path. If `godbus` cannot directly wrap the FD, add a small internal transport adapter.
-
-The inherited FD should connect to a root/backend-owned bridge or directly to the private backend bus. The key requirement is that arbitrary desktop-user processes cannot independently obtain another equivalent connection.
-
-## Backend Bridge
-
-A bridge process is likely the most practical first implementation.
+The trusted broker owns the secure-local mediation boundary.
 
 Responsibilities:
 
-- Run as root or the backend user.
-- Have access to the backend private D-Bus bus.
-- Hold the private backend bus address.
-- Expose only the inherited FD/socketpair to the proxy child.
-- Forward D-Bus bytes between the proxy FD and the private backend bus.
+- Run as root or a dedicated non-desktop service user under a root-owned systemd unit.
+- Connect to the desktop user's session bus and own `org.freedesktop.secrets`.
+- Connect to the private backend bus without passing that connection or socket path to the desktop user.
+- Hold approval/auth state in root-owned secure-local state, not under the desktop user's home directory.
+- Forward Secret Service calls after policy decisions.
+- Eventually expose a narrow UI/control API to a desktop-user UI agent without granting backend transport access.
+- Avoid loopback TCP for secure-local approval/admin control; use a Unix socket and peer-credential-aware authorization.
 
-This avoids exposing the backend bus path to the desktop user. The backend bus will see the bridge as the peer, not the original desktop app. That is acceptable because the proxy already resolves and records the original public D-Bus sender before forwarding.
+The desktop-user process is only a UI agent. It may show notifications and open a browser, but it must not hold backend bus access or be the sole authority for approval decisions.
+
+The initial broker keeps the API Unix-socket-only and root-owned while the UI-agent authorization path is incomplete. The socket is `/run/secrets-dispatcher/<desktop-user>/api.sock`, the server requires `SO_PEERCRED` UID 0 before normal API auth, and no loopback TCP listener is opened by default. That is less usable, but it avoids creating a localhost bearer-token approval bypass.
+
+Before allowing a desktop-user UI agent to approve, deny, unlock, or mutate rules, secure mode needs an explicit authorization design such as Polkit, PAM, or another user-presence check. A desktop-user-readable bearer token is not sufficient for the same-UID malware threat model.
 
 ## Backend Provider Contract
 
@@ -236,10 +236,9 @@ Candidate implementation A: proxy-initiated unlock helper.
 2. Proxy detects that the backend is locked.
 3. Proxy creates a high-priority unlock request in the Web UI and desktop notification.
 4. User enters the backend keyring password into the proxy UI.
-5. Proxy sends the password over its private inherited control channel to the root/backend launcher.
-6. Launcher invokes the provider's non-interactive unlock as the backend user.
-7. Launcher returns success/failure.
-8. Proxy retries the original operation or asks the app to retry, depending on Secret Service semantics.
+5. Trusted broker invokes the provider's non-interactive unlock as the backend user.
+6. Trusted broker returns success/failure to the UI agent.
+7. Trusted broker retries the original operation or asks the app to retry, depending on Secret Service semantics.
 
 Candidate implementation B: backend-originated unlock challenge.
 
@@ -255,7 +254,7 @@ Security requirements:
 - Do not log the password.
 - Do not put the password in argv or environment.
 - Pass via stdin or a pipe only.
-- Mark secure-mode proxy non-dumpable where possible (`prctl(PR_SET_DUMPABLE, 0)`) to reduce same-user ptrace leakage.
+- Keep backend bus descriptors and decrypted secret transport out of desktop-user processes.
 - Keep unlock attempts rate-limited.
 - Make unlock UI visibly different from ordinary approval prompts.
 
@@ -265,15 +264,7 @@ Open question: whether the proxy should directly initiate unlock, or only respon
 
 ## Public Session Bus Ownership
 
-The proxy still runs as the desktop user so it can own `org.freedesktop.secrets` on that user's session bus.
-
-The root launcher must provide the proxy with:
-
-```text
-XDG_RUNTIME_DIR=/run/user/<desktop-uid>
-DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<desktop-uid>/bus
-HOME=<desktop-user-home>
-```
+The trusted broker connects to the desktop user's session bus at `/run/user/<uid>/bus` and owns `org.freedesktop.secrets` there. It does not need to run as the desktop user and must not pass backend bus access to a desktop-user helper.
 
 The root-owned systemd service must start only after the user's session bus exists, and stop when the user session ends unless lingering secure mode is explicitly requested.
 
@@ -339,10 +330,11 @@ Secure mode has to be tested in layers. Not every malicious same-user behavior c
 
 ### CI-Safe Unit Tests
 
-- Config accepts `secure-local`, provider selection, and `upstream.type: inherited_fd` only when required fields are present.
+- Config accepts `secure-local` provider selection without changing existing non-secure upstream/downstream modes.
 - Existing `remote/local/full` configs remain valid.
 - Systemd unit templates never reference user-writable binary paths.
 - Provisioning templates render per-user backend names and state directories correctly.
+- Secure-local API uses a Unix socket with peer-credential UID checks and no default loopback TCP listener.
 - Provider interface maps locked/unlocked/error states distinctly.
 - Unlock helper command construction never places passwords in argv or environment.
 - Rule hardening still rejects broad durable rules and unsafe multi-item approvals.
@@ -350,8 +342,8 @@ Secure mode has to be tested in layers. Not every malicious same-user behavior c
 ### Unprivileged Integration Tests
 
 - Use private `dbus-daemon` instances and fake Secret Service backends.
-- Use socketpairs to verify inherited-FD upstream behavior without root.
-- Verify the proxy can use an inherited FD and does not require a backend path in config.
+- Verify the trusted broker can connect to private frontend/backend D-Bus instances without passing backend FDs to desktop-user processes.
+- Verify secure-local uses root-owned state for auth cookies, saved rules, temporary rules, and history.
 - Verify the proxy detects a simulated locked backend and creates the expected unlock request.
 - Verify the proxy retries or resumes after a simulated successful unlock.
 
@@ -365,6 +357,7 @@ These should run in a VM, privileged container with systemd, or local manual tes
 - Verify each backend runs as the matching backend user.
 - Verify backend state files are unreadable and unwritable by the desktop user.
 - Verify arbitrary desktop-user processes cannot connect to the backend transport even if they know candidate paths.
+- Verify arbitrary desktop-user processes cannot call the secure-local approval/admin API until the UI-agent authorization path is implemented.
 - Verify a request can be approved, forwarded, unlocked, and completed through GNOME Keyring.
 - Verify uninstall/rollback restores non-secure modes and public GNOME Keyring activation state.
 
@@ -392,12 +385,10 @@ Some behaviors are distribution- and desktop-dependent and should be captured in
 
 Secure mode should require an explicit provider in provisioning/config, even while only GNOME Keyring is implemented.
 
-Example:
+Example trusted policy snippet:
 
 ```yaml
 serve:
-  upstream:
-    type: inherited_fd
   secure_backend:
     provider: gnome-keyring
 ```
@@ -409,16 +400,16 @@ Provider-specific fields can be added later under `secure_backend.provider_confi
 ### Phase 1: Config and Planning Scaffolding
 
 - Add `secure-local` as a recognized install mode.
-- Add config validation for `upstream.type: inherited_fd`.
 - Add secure backend provider config with `gnome-keyring` as the only accepted provider.
-- Add clear errors if `serve` is run with inherited FD missing.
 - Add tests for config validation, install-mode parsing, and provider selection.
 
-### Phase 2: Inherited FD Upstream
+### Phase 2: Trusted Broker
 
-- Add D-Bus connection support from an inherited FD.
+- Add trusted broker support that connects to the desktop user's session bus and private backend bus.
+- Keep backend bus access in the trusted broker process, not in a desktop-user child.
+- Store secure-local auth/rules/history under root-owned state.
 - Keep existing `session_bus`, `socket`, and `sockets` behavior unchanged.
-- Add unit tests with a socketpair/private dbus-daemon if practical.
+- Add tests proving secure-local does not create a desktop-user proxy child with backend FD access.
 
 ### Phase 3: Root Launcher Prototype
 
@@ -426,7 +417,7 @@ Provider-specific fields can be added later under `secure_backend.provider_confi
 - Root-only preflight checks.
 - Start private backend D-Bus daemon as backend user.
 - Start the selected backend provider as backend user; initially only GNOME Keyring.
-- Start proxy as desktop user with inherited backend FD.
+- Run the trusted broker/proxy outside the desktop user's UID boundary.
 - Supervise all children.
 - Integration test as much as possible without root; isolate privileged calls behind testable interfaces.
 
@@ -451,7 +442,7 @@ Provider-specific fields can be added later under `secure_backend.provider_confi
 
 - Start per-user secure instances on login.
 - Stop per-user instances on logout unless configured to linger.
-- Ensure Alice and Bob get separate backend users/stores/FDS.
+- Ensure Alice and Bob get separate backend users, stores, and trusted broker instances.
 - Add status/check commands that show per-user instance health.
 
 ### Phase 7: Migration Tool
@@ -491,10 +482,11 @@ It should also incorporate saved-rule hardening before being considered secure e
 - `org.freedesktop.secrets` is owned by the secure proxy on that user's session bus.
 - The selected backend provider runs as the backend user.
 - Backend bus/socket is not connectable by arbitrary processes running as the desktop user.
+- Secure-local approval/admin API is not exposed on loopback TCP and rejects non-root Unix-socket peers until a stronger UI-agent authorization path exists.
 - The proxy can detect locked backend state and request human authentication.
 - The backend can be unlocked through the chosen provider mechanism without putting the password in argv/env/logs.
 - After unlock, the proxy can complete or retry the original Secret Service request and obtain the requested secret through the normal backend path.
 - Multiple users can run isolated instances simultaneously.
-- CI-safe unit and unprivileged integration tests cover config, provider selection, inherited FD behavior, and locked-state handling.
+- CI-safe unit and unprivileged integration tests cover config, provider selection, trusted broker behavior, and locked-state handling.
 - Root/systemd integration tests cover per-user provisioning, backend-user isolation, and malicious direct-connect attempts.
 - Documentation clearly states what this protects and what same-user malware can still do.

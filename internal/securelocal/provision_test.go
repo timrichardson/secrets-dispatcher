@@ -89,6 +89,15 @@ func TestProvisionSecureLocalCreatesBackendUserAndUnit(t *testing.T) {
 	if !strings.Contains(unitContent, "secure-launch --user %i --backend gnome-keyring") {
 		t.Fatalf("secure unit missing secure-launch ExecStart, got:\n%s", unitContent)
 	}
+	if !strings.Contains(unitContent, "--config /etc/secrets-dispatcher/secure/%i.yaml") {
+		t.Fatalf("secure unit should pass root-owned trusted config path, got:\n%s", unitContent)
+	}
+	if strings.Contains(unitContent, "SECRETS_DISPATCHER_BACKEND_FD") {
+		t.Fatalf("secure unit must not pass backend FD to a desktop-user process, got:\n%s", unitContent)
+	}
+	if !strings.Contains(unitContent, "ReadWritePaths=/run/secrets-dispatcher /var/lib/secret-companion /var/lib/secrets-dispatcher/secure") {
+		t.Fatalf("secure unit missing required write paths, got:\n%s", unitContent)
+	}
 	if strings.Contains(unitContent, "/home/") || strings.Contains(unitContent, "/tmp/") {
 		t.Fatalf("secure unit should not reference user-writable paths, got:\n%s", unitContent)
 	}
@@ -121,7 +130,12 @@ func TestProvisionSecureLocalDirs(t *testing.T) {
 		filepath.Join("/var/lib/secret-companion", "tim"),
 		filepath.Join("/var/lib/secret-companion", "tim", ".config"),
 		filepath.Join("/var/lib/secret-companion", "tim", ".cache"),
+		filepath.Join("/var/lib/secret-companion", "tim", ".local"),
+		filepath.Join("/var/lib/secret-companion", "tim", ".local", "share"),
 		filepath.Join("/var/lib/secret-companion", "tim", ".local", "share", "keyrings"),
+		DefaultSecureConfigBase,
+		DefaultSecureStateBase,
+		filepath.Join(DefaultSecureStateBase, "tim"),
 	}
 	for _, path := range want {
 		if !containsString(dirs, path) {

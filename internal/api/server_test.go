@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -168,4 +171,113 @@ func TestServer_CookieFilePath(t *testing.T) {
 	if server.CookieFilePath() != auth.FilePath() {
 		t.Errorf("expected %s, got %s", auth.FilePath(), server.CookieFilePath())
 	}
+}
+
+func TestServer_UnixSocketOnly(t *testing.T) {
+	tempDir := t.TempDir()
+	mgr := approval.NewManager(approval.ManagerConfig{Timeout: 5 * time.Minute, HistoryMax: 100})
+	auth, err := NewAuth(tempDir)
+	if err != nil {
+		t.Fatalf("NewAuth failed: %v", err)
+	}
+	socketPath := filepath.Join(tempDir, "api.sock")
+	server, err := NewServerWithProvider("", mgr, nil, auth, socketPath, false, nil, 0)
+	if err != nil {
+		t.Fatalf("NewServerWithProvider failed: %v", err)
+	}
+	if server.Addr() != "" {
+		t.Fatalf("Addr() = %q, want empty for Unix-only server", server.Addr())
+	}
+	if server.UnixSocketPath != socketPath {
+		t.Fatalf("UnixSocketPath = %q, want %q", server.UnixSocketPath, socketPath)
+	}
+	if err := server.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer server.Shutdown(context.Background())
+
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+		},
+	}}
+	req, _ := http.NewRequest(http.MethodGet, "http://unix/api/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer "+auth.Token())
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body)
+	}
+}
+
+func TestServer_UnixSocketPeerUIDs(t *testing.T) {
+	t.Run("allows matching UID", func(t *testing.T) {
+		tempDir := t.TempDir()
+		mgr := approval.NewManager(approval.ManagerConfig{Timeout: 5 * time.Minute, HistoryMax: 100})
+		auth, err := NewAuth(tempDir)
+		if err != nil {
+			t.Fatalf("NewAuth failed: %v", err)
+		}
+		socketPath := filepath.Join(tempDir, "api.sock")
+		server, err := NewServerWithProviderAndUnixPeerUIDs("", mgr, nil, auth, socketPath, false, nil, 0, []uint32{uint32(os.Geteuid())})
+		if err != nil {
+			t.Fatalf("NewServerWithProviderAndUnixPeerUIDs failed: %v", err)
+		}
+		if err := server.Start(); err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		defer server.Shutdown(context.Background())
+
+		resp := doUnixStatusRequest(t, socketPath, auth.Token())
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("rejects non-matching UID", func(t *testing.T) {
+		tempDir := t.TempDir()
+		mgr := approval.NewManager(approval.ManagerConfig{Timeout: 5 * time.Minute, HistoryMax: 100})
+		auth, err := NewAuth(tempDir)
+		if err != nil {
+			t.Fatalf("NewAuth failed: %v", err)
+		}
+		socketPath := filepath.Join(tempDir, "api.sock")
+		server, err := NewServerWithProviderAndUnixPeerUIDs("", mgr, nil, auth, socketPath, false, nil, 0, []uint32{uint32(os.Geteuid() + 1)})
+		if err != nil {
+			t.Fatalf("NewServerWithProviderAndUnixPeerUIDs failed: %v", err)
+		}
+		if err := server.Start(); err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		defer server.Shutdown(context.Background())
+
+		resp := doUnixStatusRequest(t, socketPath, auth.Token())
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 403: %s", resp.StatusCode, body)
+		}
+	})
+}
+
+func doUnixStatusRequest(t *testing.T, socketPath, token string) *http.Response {
+	t.Helper()
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+		},
+	}}
+	req, _ := http.NewRequest(http.MethodGet, "http://unix/api/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	return resp
 }

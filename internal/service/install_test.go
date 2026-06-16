@@ -491,17 +491,35 @@ func TestInstallSecureLocalConfig(t *testing.T) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		t.Fatalf("unmarshal config: %v", err)
 	}
-	if cfg.Serve.Upstream.Type != "inherited_fd" {
-		t.Fatalf("upstream type = %q, want inherited_fd", cfg.Serve.Upstream.Type)
+	if cfg.Serve.Upstream.Type != "session_bus" {
+		t.Fatalf("upstream type = %q, want session_bus", cfg.Serve.Upstream.Type)
 	}
-	if cfg.Serve.Upstream.Path != "" {
-		t.Fatalf("upstream path = %q, want empty", cfg.Serve.Upstream.Path)
+	if len(cfg.Serve.Downstream) != 1 || cfg.Serve.Downstream[0].Type != "sockets" {
+		t.Fatalf("downstream = %+v, want one sockets downstream", cfg.Serve.Downstream)
 	}
-	if len(cfg.Serve.Downstream) != 1 || cfg.Serve.Downstream[0].Type != "session_bus" {
-		t.Fatalf("downstream = %+v, want one session_bus", cfg.Serve.Downstream)
+	if cfg.Serve.Downstream[0].Path != "/run/user/1000/secrets-dispatcher/sockets" {
+		t.Fatalf("downstream path = %q", cfg.Serve.Downstream[0].Path)
 	}
 	if cfg.Serve.SecureBackend == nil || cfg.Serve.SecureBackend.Provider != "gnome-keyring" {
 		t.Fatalf("secure_backend = %+v, want gnome-keyring", cfg.Serve.SecureBackend)
+	}
+}
+
+func TestInstallSecureLocalRejectsCustomConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+
+	mockSecureProvisioned(t, true)
+	mockSystemctl(t)
+
+	err := Install(Options{Mode: "secure-local", ConfigPath: filepath.Join(tmpDir, "custom.yaml")})
+	if err == nil {
+		t.Fatal("Install() error = nil, want custom config rejection")
+	}
+	if !strings.Contains(err.Error(), "--config is not supported") {
+		t.Fatalf("error should mention --config, got: %v", err)
 	}
 }
 

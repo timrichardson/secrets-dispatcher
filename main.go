@@ -22,7 +22,6 @@ import (
 	"github.com/nikicat/secrets-dispatcher/internal/companion"
 	"github.com/nikicat/secrets-dispatcher/internal/config"
 	"github.com/nikicat/secrets-dispatcher/internal/daemon"
-	"github.com/nikicat/secrets-dispatcher/internal/dbusconn"
 	"github.com/nikicat/secrets-dispatcher/internal/gpgsign"
 	"github.com/nikicat/secrets-dispatcher/internal/notification"
 	"github.com/nikicat/secrets-dispatcher/internal/proxy"
@@ -521,9 +520,6 @@ func runServe(args []string) {
 					if ctx.Err() != nil {
 						return ctx.Err()
 					}
-					if cfg.Serve.Upstream.Type == "inherited_fd" {
-						return fmt.Errorf("secure-local upstream disconnected; restart the secure launcher to obtain a new inherited backend FD: %w", err)
-					}
 					slog.Warn("session bus downstream disconnected, reconnecting",
 						"error", err, "after", backoff)
 					select {
@@ -692,8 +688,6 @@ func connectUpstream(upstream config.BusConfig, upstreamAddr string) (*dbus.Conn
 			upstreamAddr = "unix:path=" + upstream.Path
 		}
 		return dbus.Connect(upstreamAddr)
-	case "inherited_fd":
-		return dbusconn.ConnectInheritedEnv()
 	default:
 		return nil, fmt.Errorf("unsupported upstream type %q", upstream.Type)
 	}
@@ -1078,8 +1072,7 @@ func runSecureLaunch(args []string) {
 	backendUser := fs.String("backend-user", "", "Backend username (default: secrets-{user})")
 	backend := fs.String("backend", "gnome-keyring", "Secure backend provider")
 	homeBase := fs.String("backend-home-base", "/var/lib/secret-companion", "Parent directory for backend homes")
-	configPath := fs.String("config", "", "Desktop user's secrets-dispatcher config path")
-	binaryPath := fs.String("binary", "", "secrets-dispatcher binary used to start the desktop-user proxy (default: current executable)")
+	configPath := fs.String("config", "", "Trusted secure-local config path (default: /etc/secrets-dispatcher/secure/{user}.yaml)")
 	dbusDaemon := fs.String("dbus-daemon", "dbus-daemon", "dbus-daemon binary path")
 	fs.Parse(args)
 
@@ -1092,7 +1085,6 @@ func runSecureLaunch(args []string) {
 		HomeBase:       *homeBase,
 		Provider:       *backend,
 		ConfigPath:     *configPath,
-		BinaryPath:     *binaryPath,
 		DBusDaemonPath: *dbusDaemon,
 	}
 	if err := securelocal.RunLauncher(ctx, cfg); err != nil {

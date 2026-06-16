@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 
@@ -23,27 +24,20 @@ func connContext(ctx context.Context, c net.Conn) context.Context {
 	return context.WithValue(ctx, connContextKey{}, c)
 }
 
-// resolvePeerInfo extracts peer credentials from a Unix socket connection
-// in the request context and resolves the user-facing process that invoked
-// git commit.
-//
-// Process chain example: claude → zsh → git → secrets-dispatcher → (HTTP)
-// We walk up from the peer PID, skip the thin client and git, then skip
-// any intermediate shells to find the real invoker (e.g., "claude").
-func resolvePeerInfo(ctx context.Context, trimAtSessionLeader bool) approval.SenderInfo {
+func unixPeerCredentials(ctx context.Context) (*unix.Ucred, bool) {
 	c, ok := ctx.Value(connContextKey{}).(net.Conn)
 	if !ok || c == nil {
-		return approval.SenderInfo{}
+		return nil, false
 	}
 
 	uc, ok := c.(*net.UnixConn)
 	if !ok {
-		return approval.SenderInfo{}
+		return nil, false
 	}
 
 	raw, err := uc.SyscallConn()
 	if err != nil {
-		return approval.SenderInfo{}
+		return nil, false
 	}
 
 	var cred *unix.Ucred
@@ -52,6 +46,40 @@ func resolvePeerInfo(ctx context.Context, trimAtSessionLeader bool) approval.Sen
 		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
 	})
 	if credErr != nil || cred == nil {
+		return nil, false
+	}
+	return cred, true
+}
+
+func requireUnixPeerUIDs(next http.Handler, allowedUIDs []uint32) http.Handler {
+	allowed := make(map[uint32]struct{}, len(allowedUIDs))
+	for _, uid := range allowedUIDs {
+		allowed[uid] = struct{}{}
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cred, ok := unixPeerCredentials(r.Context())
+		if !ok {
+			writeError(w, "Unix peer credentials required", http.StatusForbidden)
+			return
+		}
+		if _, ok := allowed[uint32(cred.Uid)]; !ok {
+			writeError(w, "Unix peer UID not allowed", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// resolvePeerInfo extracts peer credentials from a Unix socket connection
+// in the request context and resolves the user-facing process that invoked
+// git commit.
+//
+// Process chain example: claude → zsh → git → secrets-dispatcher → (HTTP)
+// We walk up from the peer PID, skip the thin client and git, then skip
+// any intermediate shells to find the real invoker (e.g., "claude").
+func resolvePeerInfo(ctx context.Context, trimAtSessionLeader bool) approval.SenderInfo {
+	cred, ok := unixPeerCredentials(ctx)
+	if !ok {
 		return approval.SenderInfo{}
 	}
 

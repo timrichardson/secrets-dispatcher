@@ -32,7 +32,7 @@ type Server struct {
 func NewServer(addr string, manager *approval.Manager, remoteSocket, clientName string, auth *Auth, unixSocketPath string, trimProcessChain bool, upstreamNotifier proxy.UpstreamNotifier, slowThreshold time.Duration) (*Server, error) {
 	handlers := NewHandlers(manager, remoteSocket, clientName, auth, trimProcessChain, upstreamNotifier, slowThreshold)
 	wsHandler := NewWSHandler(manager, nil, auth, remoteSocket, clientName)
-	return newServerWithHandlers(addr, handlers, wsHandler, auth, unixSocketPath)
+	return newServerWithHandlers(addr, handlers, wsHandler, auth, unixSocketPath, nil)
 }
 
 // NewServerWithProvider creates a new API server for multi-socket mode.
@@ -41,12 +41,20 @@ func NewServer(addr string, manager *approval.Manager, remoteSocket, clientName 
 func NewServerWithProvider(addr string, manager *approval.Manager, provider ClientProvider, auth *Auth, unixSocketPath string, trimProcessChain bool, upstreamNotifier proxy.UpstreamNotifier, slowThreshold time.Duration) (*Server, error) {
 	handlers := NewHandlersWithProvider(manager, provider, auth, trimProcessChain, upstreamNotifier, slowThreshold)
 	wsHandler := NewWSHandler(manager, provider, auth, "", "")
-	return newServerWithHandlers(addr, handlers, wsHandler, auth, unixSocketPath)
+	return newServerWithHandlers(addr, handlers, wsHandler, auth, unixSocketPath, nil)
+}
+
+// NewServerWithProviderAndUnixPeerUIDs creates a provider-backed API server that
+// only serves requests from Unix-socket peers with one of the supplied UIDs.
+func NewServerWithProviderAndUnixPeerUIDs(addr string, manager *approval.Manager, provider ClientProvider, auth *Auth, unixSocketPath string, trimProcessChain bool, upstreamNotifier proxy.UpstreamNotifier, slowThreshold time.Duration, allowedPeerUIDs []uint32) (*Server, error) {
+	handlers := NewHandlersWithProvider(manager, provider, auth, trimProcessChain, upstreamNotifier, slowThreshold)
+	wsHandler := NewWSHandler(manager, provider, auth, "", "")
+	return newServerWithHandlers(addr, handlers, wsHandler, auth, unixSocketPath, allowedPeerUIDs)
 }
 
 // newServerWithHandlers creates a new API server with the given handlers.
 // If unixSocketPath is non-empty, the server also listens on a Unix socket.
-func newServerWithHandlers(addr string, handlers *Handlers, wsHandler *WSHandler, auth *Auth, unixSocketPath string) (*Server, error) {
+func newServerWithHandlers(addr string, handlers *Handlers, wsHandler *WSHandler, auth *Auth, unixSocketPath string, allowedPeerUIDs []uint32) (*Server, error) {
 
 	// Create the main router
 	rootMux := http.NewServeMux()
@@ -124,14 +132,24 @@ func newServerWithHandlers(addr string, handlers *Handlers, wsHandler *WSHandler
 	// Static files (no auth required)
 	rootMux.Handle("/", NewSPAHandler())
 
-	// Create listener first to catch address-in-use errors early
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
+	// Create listener first to catch address-in-use errors early. Empty addr
+	// is used by secure-local when the API is intentionally Unix-socket only.
+	var listener net.Listener
+	var err error
+	if addr != "" {
+		listener, err = net.Listen("tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	handler := http.Handler(rootMux)
+	if len(allowedPeerUIDs) > 0 {
+		handler = requireUnixPeerUIDs(handler, allowedPeerUIDs)
 	}
 
 	httpServer := &http.Server{
-		Handler:     rootMux,
+		Handler:     handler,
 		ConnContext: connContext,
 	}
 
@@ -150,17 +168,21 @@ func newServerWithHandlers(addr string, handlers *Handlers, wsHandler *WSHandler
 
 		// Ensure parent directory exists with restrictive permissions.
 		if err := os.MkdirAll(filepath.Dir(unixSocketPath), 0700); err != nil {
-			listener.Close()
+			if listener != nil {
+				listener.Close()
+			}
 			return nil, err
 		}
 
 		unixListener, err := net.Listen("unix", unixSocketPath)
 		if err != nil {
-			listener.Close()
+			if listener != nil {
+				listener.Close()
+			}
 			return nil, err
 		}
 
-		// Owner-only access: thin client runs as same user as daemon.
+		// Owner-only filesystem access; broader access requires explicit peer-UID policy.
 		os.Chmod(unixSocketPath, 0600) //nolint:errcheck
 
 		s.unixListener = unixListener
@@ -172,11 +194,13 @@ func newServerWithHandlers(addr string, handlers *Handlers, wsHandler *WSHandler
 
 // Start begins serving HTTP requests. This is non-blocking.
 func (s *Server) Start() error {
-	go func() {
-		if err := s.httpServer.Serve(s.listener); err != nil && err != http.ErrServerClosed {
-			slog.Error("HTTP server error", "error", err)
-		}
-	}()
+	if s.listener != nil {
+		go func() {
+			if err := s.httpServer.Serve(s.listener); err != nil && err != http.ErrServerClosed {
+				slog.Error("HTTP server error", "error", err)
+			}
+		}()
+	}
 	if s.unixListener != nil {
 		go func() {
 			if err := s.httpServer.Serve(s.unixListener); err != nil && err != http.ErrServerClosed {
@@ -189,6 +213,9 @@ func (s *Server) Start() error {
 
 // Addr returns the address the server is listening on.
 func (s *Server) Addr() string {
+	if s.listener == nil {
+		return ""
+	}
 	return s.listener.Addr().String()
 }
 

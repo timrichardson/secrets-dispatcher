@@ -3,15 +3,12 @@ package securelocal
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 
-	"github.com/nikicat/secrets-dispatcher/internal/dbusconn"
 	"github.com/nikicat/secrets-dispatcher/internal/securebackend"
 )
 
@@ -21,9 +18,7 @@ type LaunchConfig struct {
 	HomeBase       string
 	Provider       string
 	ConfigPath     string
-	BinaryPath     string
 	DBusDaemonPath string
-	BackendAuthUID string
 }
 
 type childProcess struct {
@@ -41,21 +36,8 @@ func (c *LaunchConfig) defaults() error {
 	if c.BackendUser == "" && c.DesktopUser != "" {
 		c.BackendUser = "secrets-" + c.DesktopUser
 	}
-	if c.BinaryPath == "" {
-		path, err := executableFunc()
-		if err != nil {
-			return fmt.Errorf("find current executable: %w", err)
-		}
-		if resolved, err := evalSymlinksFunc(path); err == nil {
-			path = resolved
-		}
-		c.BinaryPath = path
-	}
 	if c.DBusDaemonPath == "" {
 		c.DBusDaemonPath = "dbus-daemon"
-	}
-	if c.BackendAuthUID == "" {
-		c.BackendAuthUID = strconv.Itoa(geteuidFunc())
 	}
 	return nil
 }
@@ -95,7 +77,7 @@ func RunLauncher(ctx context.Context, cfg LaunchConfig) error {
 	if err != nil {
 		return fmt.Errorf("lookup backend user %q: %w", cfg.BackendUser, err)
 	}
-	desktopUID, desktopGID, err := parseUserIDs(desktop)
+	desktopUID, _, err := parseUserIDs(desktop)
 	if err != nil {
 		return err
 	}
@@ -103,10 +85,13 @@ func RunLauncher(ctx context.Context, cfg LaunchConfig) error {
 	if err != nil {
 		return err
 	}
-
-	if cfg.ConfigPath == "" {
-		cfg.ConfigPath = filepath.Join(desktop.HomeDir, ".config", "secrets-dispatcher", "config.yaml")
+	if backendUID == 0 {
+		return fmt.Errorf("backend user %q must not be root", cfg.BackendUser)
 	}
+	if backendUID == desktopUID {
+		return fmt.Errorf("backend user %q must be distinct from desktop user %q", cfg.BackendUser, cfg.DesktopUser)
+	}
+
 	if err := prepareRuntimeDir(cfg.runtimeDir(), backendUID, backendGID); err != nil {
 		return err
 	}
@@ -142,43 +127,29 @@ func RunLauncher(ctx context.Context, cfg LaunchConfig) error {
 	providerCmd := exec.Command(providerPath, providerCmdSpec.Args...)
 	providerCmd.Stdout = os.Stdout
 	providerCmd.Stderr = os.Stderr
-	providerCmd.Env = mergeEnv(os.Environ(), providerCmdSpec.Env)
+	providerCmd.Env = minimalEnv(providerCmdSpec.Env...)
 	setCommandCredential(providerCmd, backendUID, backendGID)
 	if err := providerCmd.Start(); err != nil {
 		return fmt.Errorf("start %s backend: %w", provider.Name(), err)
 	}
 	children = append(children, &childProcess{name: provider.Name(), cmd: providerCmd})
 
-	backendFD, backendConn, err := dialBackendFD(ctx, cfg.backendBusPath(), 5*time.Second)
-	if err != nil {
-		return err
-	}
-	defer backendFD.Close()
-	defer backendConn.Close()
-
-	proxyCmd := exec.Command(cfg.BinaryPath, "serve", "--config", cfg.ConfigPath)
-	proxyCmd.Stdout = os.Stdout
-	proxyCmd.Stderr = os.Stderr
-	proxyCmd.Env = mergeEnv(os.Environ(), []string{
-		"HOME=" + desktop.HomeDir,
-		"XDG_RUNTIME_DIR=/run/user/" + desktop.Uid,
-		"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/" + desktop.Uid + "/bus",
-		dbusconn.BackendFDEnv + "=3",
-		dbusconn.BackendAuthUIDEnv + "=" + cfg.BackendAuthUID,
+	return waitForBrokerOrChild(ctx, children, func(ctx context.Context) error {
+		return runBroker(ctx, cfg, desktop, busAddress)
 	})
-	proxyCmd.ExtraFiles = []*os.File{backendFD}
-	setCommandCredential(proxyCmd, desktopUID, desktopGID)
-	if err := proxyCmd.Start(); err != nil {
-		return fmt.Errorf("start secure-local proxy: %w", err)
-	}
-	children = append(children, &childProcess{name: "proxy", cmd: proxyCmd})
-	backendFD.Close()
-	backendConn.Close()
-
-	return waitForChildren(ctx, children)
 }
 
 func prepareRuntimeDir(path string, uid, gid int) error {
+	parent := filepath.Dir(path)
+	if err := mkdirAllFunc(parent, 0711); err != nil {
+		return fmt.Errorf("create runtime parent dir %s: %w", parent, err)
+	}
+	if err := chownFunc(parent, 0, 0); err != nil {
+		return fmt.Errorf("chown runtime parent dir %s: %w", parent, err)
+	}
+	if err := chmodFunc(parent, 0711); err != nil {
+		return fmt.Errorf("chmod runtime parent dir %s: %w", parent, err)
+	}
 	if err := mkdirAllFunc(path, 0700); err != nil {
 		return fmt.Errorf("create runtime dir %s: %w", path, err)
 	}
@@ -199,7 +170,7 @@ func backendEnv(homeDir, runtimeDir, busAddress string) []string {
 	if busAddress != "" {
 		env = append(env, "DBUS_SESSION_BUS_ADDRESS="+busAddress)
 	}
-	return mergeEnv(os.Environ(), env)
+	return minimalEnv(env...)
 }
 
 func setCommandCredential(cmd *exec.Cmd, uid, gid int) {
@@ -227,27 +198,7 @@ func waitForUnixSocket(ctx context.Context, path string, timeout time.Duration) 
 	}
 }
 
-func dialBackendFD(ctx context.Context, path string, timeout time.Duration) (*os.File, net.Conn, error) {
-	dialCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(dialCtx, "unix", path)
-	if err != nil {
-		return nil, nil, fmt.Errorf("connect private backend bus: %w", err)
-	}
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		conn.Close()
-		return nil, nil, fmt.Errorf("backend connection is %T, want Unix socket", conn)
-	}
-	file, err := unixConn.File()
-	if err != nil {
-		conn.Close()
-		return nil, nil, fmt.Errorf("convert backend connection to file: %w", err)
-	}
-	return file, conn, nil
-}
-
-func waitForChildren(ctx context.Context, children []*childProcess) error {
+func waitForBrokerOrChild(ctx context.Context, children []*childProcess, run func(context.Context) error) error {
 	type result struct {
 		name string
 		err  error
@@ -258,10 +209,17 @@ func waitForChildren(ctx context.Context, children []*childProcess) error {
 			resultCh <- result{name: child.name, err: child.cmd.Wait()}
 		}(child)
 	}
+	brokerCh := make(chan error, 1)
+	go func() {
+		brokerCh <- run(ctx)
+	}()
 	select {
 	case <-ctx.Done():
 		terminateChildren(children)
 		return ctx.Err()
+	case err := <-brokerCh:
+		terminateChildren(children)
+		return err
 	case result := <-resultCh:
 		terminateChildren(children)
 		if result.err != nil {
@@ -283,36 +241,4 @@ func terminateChildren(children []*childProcess) {
 			_ = child.cmd.Process.Kill()
 		}
 	}
-}
-
-func mergeEnv(base, overrides []string) []string {
-	merged := append([]string{}, base...)
-	index := make(map[string]int, len(merged))
-	for i, entry := range merged {
-		if key, _, ok := splitEnv(entry); ok {
-			index[key] = i
-		}
-	}
-	for _, entry := range overrides {
-		key, _, ok := splitEnv(entry)
-		if !ok {
-			continue
-		}
-		if i, exists := index[key]; exists {
-			merged[i] = entry
-		} else {
-			index[key] = len(merged)
-			merged = append(merged, entry)
-		}
-	}
-	return merged
-}
-
-func splitEnv(entry string) (string, string, bool) {
-	for i, r := range entry {
-		if r == '=' {
-			return entry[:i], entry[i+1:], true
-		}
-	}
-	return "", "", false
 }

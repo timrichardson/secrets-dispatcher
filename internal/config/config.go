@@ -31,7 +31,7 @@ var defaultIgnoreChromeDummySecret = true
 
 // BusConfig describes a D-Bus endpoint (upstream backend or downstream front).
 type BusConfig struct {
-	Type string `yaml:"type"`           // "session_bus", "socket", "sockets", or upstream-only "inherited_fd"
+	Type string `yaml:"type"`           // "session_bus", "socket", or downstream-only "sockets"
 	Path string `yaml:"path,omitempty"` // required for "socket" and "sockets" types
 }
 
@@ -98,15 +98,12 @@ func (cfg *Config) Validate() error {
 	s := &cfg.Serve
 
 	switch s.Upstream.Type {
-	case "session_bus", "socket", "inherited_fd":
+	case "session_bus", "socket":
 	default:
-		return fmt.Errorf("upstream type must be \"session_bus\", \"socket\", or \"inherited_fd\", got %q", s.Upstream.Type)
+		return fmt.Errorf("upstream type must be \"session_bus\" or \"socket\", got %q", s.Upstream.Type)
 	}
 	if s.Upstream.Type == "socket" && s.Upstream.Path == "" {
 		return fmt.Errorf("upstream type \"socket\" requires a non-empty path")
-	}
-	if s.Upstream.Type == "inherited_fd" && s.Upstream.Path != "" {
-		return fmt.Errorf("upstream type \"inherited_fd\" must not set path")
 	}
 	if s.SecureBackend != nil {
 		if s.SecureBackend.Provider != "gnome-keyring" {
@@ -133,14 +130,6 @@ func (cfg *Config) Validate() error {
 
 	if s.Upstream.Type == "session_bus" && hasSessionBusDown {
 		return fmt.Errorf("upstream and downstream cannot both be session_bus (same bus)")
-	}
-	if s.Upstream.Type == "inherited_fd" {
-		if s.SecureBackend == nil || s.SecureBackend.Provider == "" {
-			return fmt.Errorf("upstream type \"inherited_fd\" requires secure_backend.provider")
-		}
-		if len(s.Downstream) != 1 || s.Downstream[0].Type != "session_bus" {
-			return fmt.Errorf("upstream type \"inherited_fd\" requires exactly one session_bus downstream")
-		}
 	}
 
 	// Validate trust rules

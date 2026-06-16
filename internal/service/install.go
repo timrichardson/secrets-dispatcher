@@ -197,6 +197,9 @@ func Install(opts Options) error {
 		if opts.BackendPath != "" && opts.BackendPath != "gnome-keyring" {
 			return fmt.Errorf("secure-local only supports backend provider %q", "gnome-keyring")
 		}
+		if opts.ConfigPath != "" {
+			return fmt.Errorf("secure-local uses root-owned trusted config; --config is not supported for this mode")
+		}
 		if !secureProvisionedFunc() {
 			return fmt.Errorf("secure-local requires root provisioning first; run: sudo secrets-dispatcher provision --mode secure-local --user $USER")
 		}
@@ -396,8 +399,8 @@ func updateTopologyConfig(configPath, runtimeDir, mode string) error {
 		}
 		cfg.Serve.SecureBackend = nil
 	case "secure-local":
-		cfg.Serve.Upstream = config.BusConfig{Type: "inherited_fd"}
-		cfg.Serve.Downstream = []config.BusConfig{{Type: "session_bus"}}
+		cfg.Serve.Upstream = config.BusConfig{Type: "session_bus"}
+		cfg.Serve.Downstream = []config.BusConfig{{Type: "sockets", Path: socketsDir}}
 		cfg.Serve.SecureBackend = &config.SecureBackendConfig{Provider: "gnome-keyring"}
 	}
 	if mode == "remote" || mode == "local" {
