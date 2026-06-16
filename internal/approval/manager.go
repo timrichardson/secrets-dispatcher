@@ -171,6 +171,7 @@ type AutoApproveRule struct {
 	ID          string            `json:"id"`
 	InvokerName string            `json:"invoker_name"`
 	RequestType RequestType       `json:"request_type"`
+	Process     *ProcessMatcher   `json:"process,omitempty"`
 	Collection  string            `json:"collection"`
 	Attributes  map[string]string `json:"attributes,omitempty"`
 	ExpiresAt   time.Time         `json:"expires_at"`
@@ -411,7 +412,7 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 	}
 
 	// Check auto-approve rules (for timed-out client retries).
-	if rule := m.checkAutoApproveRules(senderInfo, items, reqType); rule != nil {
+	if rule := m.checkAutoApproveRules(senderInfo, items, reqType, searchAttrs); rule != nil {
 		slog.Info("auto-approve rule matched",
 			"rule_id", rule.ID,
 			"invoker", rule.InvokerName,
@@ -710,6 +711,7 @@ func (m *Manager) AddAutoApproveRule(req *Request) string {
 		ID:          uuid.New().String(),
 		InvokerName: req.SenderInfo.UnitName,
 		RequestType: req.Type,
+		Process:     processMatcherFromSender(req.SenderInfo),
 		ExpiresAt:   time.Now().Add(duration),
 	}
 
@@ -730,6 +732,7 @@ func (m *Manager) AddAutoApproveRule(req *Request) string {
 		existing := &m.autoApproveRules[i]
 		if existing.InvokerName == rule.InvokerName &&
 			existing.RequestType == rule.RequestType &&
+			processMatchersEqual(existing.Process, rule.Process) &&
 			existing.Collection == rule.Collection &&
 			attributesEqual(existing.Attributes, rule.Attributes) {
 			existing.ExpiresAt = rule.ExpiresAt
@@ -761,12 +764,12 @@ func (m *Manager) AddAutoApproveRule(req *Request) string {
 // flow and need to consult ephemeral auto-approve rules before opening a
 // notification. Same matching semantics as RequireApproval's auto-approve check.
 func (m *Manager) CheckAutoApproveRules(senderInfo SenderInfo, items []ItemInfo, reqType RequestType) *AutoApproveRule {
-	return m.checkAutoApproveRules(senderInfo, items, reqType)
+	return m.checkAutoApproveRules(senderInfo, items, reqType, nil)
 }
 
 // checkAutoApproveRules checks if the request matches any active auto-approve rule.
 // Returns the matching rule or nil.
-func (m *Manager) checkAutoApproveRules(senderInfo SenderInfo, items []ItemInfo, reqType RequestType) *AutoApproveRule {
+func (m *Manager) checkAutoApproveRules(senderInfo SenderInfo, items []ItemInfo, reqType RequestType, searchAttrs map[string]string) *AutoApproveRule {
 	m.autoApproveMu.Lock()
 	defer m.autoApproveMu.Unlock()
 
@@ -786,31 +789,53 @@ func (m *Manager) checkAutoApproveRules(senderInfo SenderInfo, items []ItemInfo,
 			continue // already found a match, just cleaning
 		}
 
-		// Match invoker name
-		if rule.InvokerName != senderInfo.UnitName {
+		// Match process. New rules use a stable process matcher; older in-memory
+		// rules fall back to the display invoker name.
+		if rule.Process != nil {
+			if !matchProcess(rule.Process, senderInfo) {
+				continue
+			}
+		} else if rule.InvokerName != senderInfo.UnitName {
 			continue
 		}
 		// Match request type
 		if rule.RequestType != reqType {
 			continue
 		}
-		// Match collection
-		reqCollection := ""
-		if len(items) > 0 {
-			reqCollection = extractCollection(items[0].Path)
+		if reqType != RequestTypeSearch && len(items) > 0 {
+			allItemsMatch := true
+			for _, item := range items {
+				if rule.Collection != "" && rule.Collection != extractCollection(item.Path) {
+					allItemsMatch = false
+					break
+				}
+				attrs := map[string]string{}
+				if item.Attributes != nil {
+					attrs = item.Attributes
+				}
+				if !attributesMatch(rule.Attributes, attrs) {
+					allItemsMatch = false
+					break
+				}
+			}
+			if !allItemsMatch {
+				continue
+			}
+		} else {
+			if reqType != RequestTypeSearch && rule.Collection != "" {
+				continue
+			}
+			attrs := map[string]string{}
+			if reqType == RequestTypeSearch {
+				attrs = searchAttrs
+			}
+			if !attributesMatch(rule.Attributes, attrs) {
+				continue
+			}
 		}
-		if rule.Collection != "" && rule.Collection != reqCollection {
-			continue
-		}
-		// Match attributes (subset match: all rule attrs must be present in request)
-		reqAttrs := map[string]string{}
-		if len(items) > 0 && items[0].Attributes != nil {
-			reqAttrs = items[0].Attributes
-		}
-		if attributesMatch(rule.Attributes, reqAttrs) {
-			matched := *rule
-			match = &matched
-		}
+
+		matched := *rule
+		match = &matched
 	}
 
 	m.autoApproveRules = active
@@ -828,6 +853,13 @@ func attributesEqual(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func processMatchersEqual(a, b *ProcessMatcher) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Exe == b.Exe && a.Name == b.Name && a.CWD == b.CWD && a.Unit == b.Unit
 }
 
 // attributesMatch returns true if all entries in ruleAttrs are present in reqAttrs.
@@ -990,7 +1022,7 @@ func matchTrustRule(rule *TrustRule, senderInfo SenderInfo, items []ItemInfo, re
 
 	// Check secret matcher
 	if rule.Secret != nil {
-		if !matchSecret(rule.Secret, items) {
+		if !matchSecret(rule.Secret, items, ruleAction(rule)) {
 			return false
 		}
 	}
@@ -1056,24 +1088,45 @@ func matchProcess(pm *ProcessMatcher, senderInfo SenderInfo) bool {
 	return true
 }
 
-// matchSecret checks if the items match the secret matcher.
-// Uses the first item for collection/label/attributes matching.
-func matchSecret(sm *SecretMatcher, items []ItemInfo) bool {
-	if sm.Collection != "" {
-		col := ""
-		if len(items) > 0 {
-			col = extractCollection(items[0].Path)
+// matchSecret checks if the request items match the secret matcher. Approve and
+// ignore rules must cover every item; deny rules trigger if any item matches.
+func matchSecret(sm *SecretMatcher, items []ItemInfo, action string) bool {
+	if !hasSecretMatcher(sm) {
+		return true
+	}
+	if len(items) == 0 {
+		return false
+	}
+	if action == "deny" {
+		for _, item := range items {
+			if matchSecretItem(sm, item) {
+				return true
+			}
 		}
+		return false
+	}
+	for _, item := range items {
+		if !matchSecretItem(sm, item) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasSecretMatcher(sm *SecretMatcher) bool {
+	return sm != nil && (sm.Collection != "" || sm.Label != "" || len(sm.Attributes) > 0)
+}
+
+func matchSecretItem(sm *SecretMatcher, item ItemInfo) bool {
+	if sm.Collection != "" {
+		col := extractCollection(item.Path)
 		if ok, _ := path.Match(sm.Collection, col); !ok {
 			return false
 		}
 	}
 
 	if sm.Label != "" {
-		label := ""
-		if len(items) > 0 {
-			label = items[0].Label
-		}
+		label := item.Label
 		if ok, _ := path.Match(sm.Label, label); !ok {
 			return false
 		}
@@ -1081,8 +1134,8 @@ func matchSecret(sm *SecretMatcher, items []ItemInfo) bool {
 
 	if len(sm.Attributes) > 0 {
 		attrs := map[string]string{}
-		if len(items) > 0 && items[0].Attributes != nil {
-			attrs = items[0].Attributes
+		if item.Attributes != nil {
+			attrs = item.Attributes
 		}
 		if !attributesMatch(sm.Attributes, attrs) {
 			return false

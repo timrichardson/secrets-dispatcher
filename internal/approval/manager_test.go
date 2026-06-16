@@ -1564,6 +1564,58 @@ func TestCheckTrustRules(t *testing.T) {
 		}
 	})
 
+	t.Run("approve secret rule requires every item to match", func(t *testing.T) {
+		m := NewManager(ManagerConfig{
+			Timeout:    time.Second,
+			HistoryMax: 10,
+			TrustRules: []TrustRule{{
+				Name:   "approve-github",
+				Action: "approve",
+				Secret: &SecretMatcher{Attributes: map[string]string{"service": "github"}},
+			}},
+		})
+		items := []ItemInfo{
+			{Path: "/org/freedesktop/secrets/collection/default/1", Attributes: map[string]string{"service": "github"}},
+			{Path: "/org/freedesktop/secrets/collection/default/2", Attributes: map[string]string{"service": "bank"}},
+		}
+		rule := m.CheckTrustRulesByAction(
+			SenderInfo{ProcessChain: []ProcessInfo{{Name: "app", PID: 1}}},
+			items,
+			RequestTypeGetSecret,
+			nil,
+			"approve",
+		)
+		if rule != nil {
+			t.Fatalf("expected mixed multi-item request not to match approve rule, got %v", rule.Name)
+		}
+	})
+
+	t.Run("deny secret rule matches any item", func(t *testing.T) {
+		m := NewManager(ManagerConfig{
+			Timeout:    time.Second,
+			HistoryMax: 10,
+			TrustRules: []TrustRule{{
+				Name:   "deny-bank",
+				Action: "deny",
+				Secret: &SecretMatcher{Attributes: map[string]string{"service": "bank"}},
+			}},
+		})
+		items := []ItemInfo{
+			{Path: "/org/freedesktop/secrets/collection/default/1", Attributes: map[string]string{"service": "github"}},
+			{Path: "/org/freedesktop/secrets/collection/default/2", Attributes: map[string]string{"service": "bank"}},
+		}
+		rule := m.CheckTrustRulesByAction(
+			SenderInfo{ProcessChain: []ProcessInfo{{Name: "app", PID: 1}}},
+			items,
+			RequestTypeGetSecret,
+			nil,
+			"deny",
+		)
+		if rule == nil || rule.Name != "deny-bank" {
+			t.Fatalf("expected deny-bank to match mixed multi-item request, got %#v", rule)
+		}
+	})
+
 	t.Run("first match wins", func(t *testing.T) {
 		// gh doing search matches rule 0 (approve-gh-search), not rule 4 (approve-search-attrs)
 		rule := mgr.CheckTrustRules(

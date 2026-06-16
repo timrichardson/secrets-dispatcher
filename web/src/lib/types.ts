@@ -93,6 +93,7 @@ export interface AutoApproveRule {
   id: string;
   invoker_name: string;
   request_type: string;
+  process?: ProcessMatcher;
   collection: string;
   attributes?: Record<string, string>;
   expires_at: string;

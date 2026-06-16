@@ -127,14 +127,20 @@
     return approvalRules.some(r =>
       r.enabled &&
       r.request_types.includes(req.type) &&
-      (r.process?.unit === invoker || r.process?.name === invoker) &&
+      processMatcherMatches(r.process, req.sender_info, invoker) &&
       (r.secret?.collection ?? "") === collection &&
       attributesEqual(r.secret?.attributes ?? r.search_attributes, attrs)
     );
   }
 
+  function processMatcherMatches(process: SavedApprovalRule["process"], sender: HistoryEntryType["request"]["sender_info"], invoker: string): boolean {
+    if (!process) return false;
+    if (process.exe && sender?.process_chain?.some(p => p.exe === process.exe)) return true;
+    return process.unit === invoker || process.name === invoker;
+  }
+
   function canSaveRule(entry: HistoryEntryType): boolean {
-    return entry.resolution === "approved" || entry.resolution === "cancelled" || entry.resolution === "auto_approved";
+    return entry.request.type !== "gpg_sign" && (entry.resolution === "approved" || entry.resolution === "cancelled" || entry.resolution === "auto_approved");
   }
 
   function sourceLabel(source: string): string {

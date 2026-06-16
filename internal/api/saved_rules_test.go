@@ -72,7 +72,10 @@ func TestHandlers_PersistAutoApproveRule(t *testing.T) {
 			Path:       "/org/freedesktop/secrets/collection/login/item1",
 			Attributes: map[string]string{"service": "github"},
 		}},
-		SenderInfo: approval.SenderInfo{UnitName: "gh"},
+		SenderInfo: approval.SenderInfo{
+			UnitName:     "gh",
+			ProcessChain: []approval.ProcessInfo{{Name: "gh", PID: 1, Exe: "/usr/bin/gh"}},
+		},
 	})
 
 	rec := httptest.NewRecorder()

@@ -74,6 +74,13 @@ async function injectHistoryEntry(
           uid: 1000,
           user_name: "testuser",
           unit_name: unitName,
+          process_chain: [
+            {
+              name: unitName,
+              pid: 4242,
+              exe: `/usr/bin/${unitName}`,
+            },
+          ],
         },
       },
       resolution: "cancelled",
@@ -184,7 +191,7 @@ test.describe("Saved Approval Rules UI", () => {
 
     await expect(temporary.getByText("persist-invoker")).not.toBeVisible();
     await expect(saved.getByText("persist-invoker get_secret")).toBeVisible();
-    await expect(saved.getByRole("cell", { name: "persist-invoker" }))
+    await expect(saved.getByRole("cell", { name: "/usr/bin/persist-invoker" }))
       .toBeVisible();
   });
 
