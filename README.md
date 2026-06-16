@@ -45,7 +45,7 @@ secrets-dispatcher adds a controlled gateway with:
 - **Full process chain visibility** — not just "dbus-daemon asked" but `claude-code → node → secret-tool`
 - **Per-operation approval** via web UI, desktop notifications, or CLI
 - **Trust rules** — auto-approve known-safe patterns, prompt for everything else
-- **Audit logging** — JSON log of every access attempt with process info and decision
+- **Audit logging** — JSON log of every access attempt with process info, decision, and decision source when policy resolves the request
 
 ## Quick Start
 

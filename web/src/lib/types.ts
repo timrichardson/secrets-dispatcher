@@ -32,6 +32,17 @@ export interface GPGSignInfo {
   parent_hash?: string;
 }
 
+export interface DecisionAttribution {
+  source: string;
+  action?: string;
+  rule_id?: string;
+  rule_name?: string;
+  rule_request_types?: string[];
+  process?: ProcessMatcher;
+  secret?: SecretMatcher;
+  search_attributes?: Record<string, string>;
+}
+
 export interface PendingRequest {
   id: string;
   client: string;
@@ -42,6 +53,7 @@ export interface PendingRequest {
   type: "get_secret" | "search" | "gpg_sign" | "delete" | "write" | "unlock" | "ssh_sign";
   search_attributes?: Record<string, string>;
   sender_info: SenderInfo;
+  attribution?: DecisionAttribution;
   gpg_sign_info?: GPGSignInfo;
 }
 
@@ -105,6 +117,7 @@ export interface TrustedSigner {
 export interface ProcessMatcher {
   exe?: string;
   name?: string;
+  cwd?: string;
   unit?: string;
 }
 
