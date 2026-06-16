@@ -103,6 +103,11 @@ func (h *Handlers) HandleGPGSignRequest(w http.ResponseWriter, r *http.Request) 
 			fmt.Sprintf("auto-approve rule %s", rule.ID))
 		return
 	}
+	if rule := h.manager.CheckSavedApprovalRules(senderInfo, nil, approval.RequestTypeGPGSign, nil); rule != nil {
+		h.signAndRecordAutoApproved(w, &req, senderInfo, commitSubject,
+			fmt.Sprintf("saved approval rule %s", rule.ID))
+		return
+	}
 
 	id, err := h.manager.CreateGPGSignRequest(req.Client, req.GPGSignInfo, senderInfo)
 	if err != nil {

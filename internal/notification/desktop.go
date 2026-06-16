@@ -37,6 +37,7 @@ type Approver interface {
 	Deny(id string) error
 	AutoApprove(requestID string) error
 	ApproveAndAutoApprove(id string) error
+	CreateSavedRuleFromRequest(requestID string) error
 }
 
 // Action represents a user interaction with a notification button.
@@ -307,6 +308,7 @@ type Handler struct {
 	mu            sync.Mutex
 	notifications map[string]uint32 // request ID -> notification ID
 	requests      map[uint32]string // notification ID -> request ID (reverse)
+	rulePrompts   map[uint32]string // follow-up notification ID -> source request ID
 	pending       *delayGroup       // notifications waiting for the grace period
 
 }
@@ -328,6 +330,7 @@ func NewHandler(notifier Notifier, approver Approver, baseURL string, showPIDs b
 		openURL:             func(u string) { exec.Command("xdg-open", u).Start() },
 		notifications:       make(map[string]uint32),
 		requests:            make(map[uint32]string),
+		rulePrompts:         make(map[uint32]string),
 		pending:             newDelayGroup(),
 	}
 }
@@ -360,7 +363,16 @@ func (h *Handler) handleAction(action Action) {
 		delete(h.requests, action.NotificationID)
 		delete(h.notifications, reqID)
 	}
+	ruleReqID, rulePrompt := h.rulePrompts[action.NotificationID]
+	if rulePrompt {
+		delete(h.rulePrompts, action.NotificationID)
+	}
 	h.mu.Unlock()
+
+	if rulePrompt {
+		h.handleRulePromptAction(action.ActionKey, ruleReqID)
+		return
+	}
 
 	if !ok {
 		return
@@ -396,6 +408,30 @@ func (h *Handler) handleAction(action Action) {
 	}
 
 	slog.Info("resolved request from notification", "action", action.ActionKey, "request_id", reqID)
+	if action.ActionKey == "approve_and_auto_approve" {
+		h.sendRuleFollowUp(reqID)
+	}
+}
+
+func (h *Handler) handleRulePromptAction(actionKey, requestID string) {
+	switch actionKey {
+	case "save_rule":
+		if err := h.approver.CreateSavedRuleFromRequest(requestID); err != nil {
+			if errors.Is(err, approval.ErrNotFound) {
+				slog.Debug("request unavailable for saved rule", "request_id", requestID)
+			} else {
+				slog.Error("failed to save approval rule", "request_id", requestID, "error", err)
+			}
+			return
+		}
+		slog.Info("saved approval rule from notification", "request_id", requestID)
+	case "review_rules", "default":
+		h.openURL(h.baseURL + "?view=rules")
+	case "dismiss":
+		return
+	default:
+		slog.Debug("unknown rule prompt action key", "action", actionKey, "request_id", requestID)
+	}
 }
 
 // OnEvent implements approval.Observer.
@@ -480,6 +516,28 @@ func (h *Handler) sendNotification(req *approval.Request) {
 	h.mu.Unlock()
 
 	slog.Debug("sent desktop notification", "request_id", req.ID, "notification_id", id)
+}
+
+func (h *Handler) sendRuleFollowUp(requestID string) {
+	actions := []string{
+		"default", "",
+		"save_rule", "Save rule",
+		"review_rules", "Review rules",
+		"dismiss", "Dismiss",
+	}
+	id, err := h.notifier.Notify(
+		"Temporary approval active",
+		"Matching requests are allowed temporarily. Save this rule to keep approving similar requests after restart, or review rules to edit its scope.",
+		"dialog-password",
+		actions,
+	)
+	if err != nil {
+		slog.Debug("failed to send rule follow-up notification", "error", err, "request_id", requestID)
+		return
+	}
+	h.mu.Lock()
+	h.rulePrompts[id] = requestID
+	h.mu.Unlock()
 }
 
 func (h *Handler) handleCancelled(req *approval.Request) {

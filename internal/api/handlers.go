@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -284,6 +285,155 @@ func (h *Handlers) HandleAutoApproveDelete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	writeJSON(w, ActionResponse{Status: "deleted"})
+}
+
+// HandleAutoApprovePersist handles POST /api/v1/auto-approve/{id}/persist.
+func (h *Handlers) HandleAutoApprovePersist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/auto-approve/"), "/persist")
+	if id == "" || strings.Contains(id, "/") {
+		writeError(w, "invalid rule ID", http.StatusBadRequest)
+		return
+	}
+
+	rule, err := h.manager.PersistAutoApproveRule(id)
+	if err != nil {
+		if err == approval.ErrNotFound {
+			writeError(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, approval.ErrInvalidRule) {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, rule)
+}
+
+// HandleSavedApprovalRuleList handles GET /api/v1/approval-rules.
+func (h *Handlers) HandleSavedApprovalRuleList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rules := h.manager.ListSavedApprovalRules()
+	if rules == nil {
+		rules = []approval.SavedApprovalRule{}
+	}
+	writeJSON(w, rules)
+}
+
+// HandleSavedApprovalRuleCreate handles POST /api/v1/approval-rules.
+func (h *Handlers) HandleSavedApprovalRuleCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req approval.SavedApprovalRule
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	rule, err := h.manager.CreateSavedApprovalRule(req)
+	if err != nil {
+		if errors.Is(err, approval.ErrInvalidRule) {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, rule)
+}
+
+// HandleSavedApprovalRuleCreateFromRequest handles POST /api/v1/approval-rules/from-request.
+func (h *Handlers) HandleSavedApprovalRuleCreateFromRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	rule, err := h.manager.CreateSavedApprovalRuleFromRequest(req.RequestID)
+	if err != nil {
+		if err == approval.ErrNotFound {
+			writeError(w, "request not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, approval.ErrInvalidRule) {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, rule)
+}
+
+// HandleSavedApprovalRuleUpdate handles PUT /api/v1/approval-rules/{id}.
+func (h *Handlers) HandleSavedApprovalRuleUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/approval-rules/")
+	if id == "" || strings.Contains(id, "/") {
+		writeError(w, "invalid rule ID", http.StatusBadRequest)
+		return
+	}
+	var req approval.SavedApprovalRule
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	rule, err := h.manager.UpdateSavedApprovalRule(id, req)
+	if err != nil {
+		if err == approval.ErrNotFound {
+			writeError(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, approval.ErrInvalidRule) {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, rule)
+}
+
+// HandleSavedApprovalRuleDelete handles DELETE /api/v1/approval-rules/{id}.
+func (h *Handlers) HandleSavedApprovalRuleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/approval-rules/")
+	if id == "" || strings.Contains(id, "/") {
+		writeError(w, "invalid rule ID", http.StatusBadRequest)
+		return
+	}
+	if err := h.manager.RemoveSavedApprovalRule(id); err != nil {
+		if err == approval.ErrNotFound {
+			writeError(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		writeError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, ActionResponse{Status: "deleted"})
 }
 
