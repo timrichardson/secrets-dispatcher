@@ -45,6 +45,7 @@ func (m *Manager) RecordAutoApprovedGPGSign(client string, info *GPGSignInfo, se
 		Type:         RequestTypeGPGSign,
 		GPGSignInfo:  info,
 		SenderInfo:   senderInfo,
+		Rule:         cloneRuleAttribution(autoApproval),
 		AutoApproval: cloneAutoApprovalInfo(autoApproval),
 		Signature:    sig,
 		GPGStatus:    status,

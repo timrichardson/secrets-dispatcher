@@ -109,8 +109,8 @@ func (f *Formatter) FormatShowResult(result *ShowResult) error {
 	f.formatRequest(&result.Request)
 	if result.Resolution != "" {
 		fmt.Fprintf(f.w, "Result:  %s\n", result.Resolution)
-		if result.Request.AutoApproval != nil {
-			fmt.Fprintf(f.w, "Rule:    %s\n", formatAutoApproval(result.Request.AutoApproval))
+		if rule := requestRuleAttribution(&result.Request); rule != nil {
+			fmt.Fprintf(f.w, "Rule:    %s\n", formatRuleAttribution(rule))
 		}
 		fmt.Fprintf(f.w, "Resolved: %s (%s)\n", result.ResolvedAt.Format(time.RFC3339), formatAgo(result.ResolvedAt))
 	}
@@ -254,7 +254,7 @@ func (f *Formatter) FormatHistory(entries []HistoryEntry) error {
 			coll = "-"
 		}
 		resolution := truncate(entry.Resolution, 10)
-		rule := truncate(formatAutoApproval(entry.Request.AutoApproval), 22)
+		rule := truncate(formatRuleAttribution(requestRuleAttribution(&entry.Request)), 22)
 		secret := truncate(requestSummary(entry.Request), 20)
 		ago := formatAgo(entry.ResolvedAt)
 
@@ -263,7 +263,14 @@ func (f *Formatter) FormatHistory(entries []HistoryEntry) error {
 	return nil
 }
 
-func formatAutoApproval(info *AutoApprovalInfo) string {
+func requestRuleAttribution(req *PendingRequest) *RuleAttribution {
+	if req.Rule != nil {
+		return req.Rule
+	}
+	return req.AutoApproval
+}
+
+func formatRuleAttribution(info *RuleAttribution) string {
 	if info == nil {
 		return "-"
 	}
@@ -273,6 +280,9 @@ func formatAutoApproval(info *AutoApprovalInfo) string {
 	}
 	if info.RuleID != "" {
 		return fmt.Sprintf("%s:%s (%s)", info.Source, label, truncate(info.RuleID, 8))
+	}
+	if label != info.Source {
+		return fmt.Sprintf("%s:%s", info.Source, label)
 	}
 	return label
 }

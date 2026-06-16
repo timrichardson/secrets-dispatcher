@@ -100,6 +100,9 @@ type Request struct {
 	// SenderInfo contains information about the requesting process.
 	SenderInfo SenderInfo `json:"sender_info"`
 
+	// Rule describes the configured, saved, or temporary rule that resolved the request.
+	Rule *RuleAttribution `json:"rule,omitempty"`
+
 	// AutoApproval describes why an auto-approved request bypassed prompting.
 	AutoApproval *AutoApprovalInfo `json:"auto_approval,omitempty"`
 
@@ -121,9 +124,10 @@ type Request struct {
 	result bool // true = approved, false = denied
 }
 
-// AutoApprovalInfo describes the mechanism that auto-approved a request.
-type AutoApprovalInfo struct {
+// RuleAttribution describes the rule or trusted source that resolved a request.
+type RuleAttribution struct {
 	Source           string            `json:"source"`
+	Action           string            `json:"action,omitempty"`
 	RuleID           string            `json:"rule_id,omitempty"`
 	RuleName         string            `json:"rule_name,omitempty"`
 	RuleRequestTypes []string          `json:"rule_request_types,omitempty"`
@@ -131,6 +135,9 @@ type AutoApprovalInfo struct {
 	Secret           *SecretMatcher    `json:"secret,omitempty"`
 	SearchAttributes map[string]string `json:"search_attributes,omitempty"`
 }
+
+// AutoApprovalInfo is kept as the JSON model for requests auto-approved by a rule/source.
+type AutoApprovalInfo = RuleAttribution
 
 // Resolution represents how a request was resolved.
 type Resolution string
@@ -365,7 +372,7 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 		return true, nil
 	}
 
-	newResolvedRequest := func(autoApproval *AutoApprovalInfo) *Request {
+	newResolvedRequest := func(rule *RuleAttribution, autoApproval *AutoApprovalInfo) *Request {
 		now := time.Now()
 		return &Request{
 			ID:               uuid.New().String(),
@@ -377,6 +384,7 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 			Type:             reqType,
 			SearchAttributes: searchAttrs,
 			SenderInfo:       senderInfo,
+			Rule:             cloneRuleAttribution(rule),
 			AutoApproval:     cloneAutoApprovalInfo(autoApproval),
 		}
 	}
@@ -384,14 +392,13 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 	// Hard config policy rules must win over every user-managed or cached approval.
 	if rule := m.CheckTrustRulesByAction(senderInfo, items, reqType, searchAttrs, "ignore", "deny"); rule != nil {
 		action := ruleAction(rule)
-		slog.Info("trust rule matched",
-			"rule_name", rule.Name,
-			"action", action)
+		attribution := NewTrustRuleAttribution(rule)
+		LogTrustRuleMatch(rule, senderInfo, items, reqType, searchAttrs, client)
 		if action == "ignore" {
-			m.notify(Event{Type: EventRequestIgnored, Request: newResolvedRequest(nil)})
+			m.notify(Event{Type: EventRequestIgnored, Request: newResolvedRequest(attribution, nil)})
 			return true, ErrIgnored
 		}
-		m.notify(Event{Type: EventRequestDenied, Request: newResolvedRequest(nil)})
+		m.notify(Event{Type: EventRequestDenied, Request: newResolvedRequest(attribution, nil)})
 		return true, ErrDeniedByRule
 	}
 
@@ -409,24 +416,24 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 			"rule_id", rule.ID,
 			"invoker", rule.InvokerName,
 			"type", rule.RequestType)
-		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(NewTemporaryRuleAutoApproval(rule))})
+		attribution := NewTemporaryRuleAutoApproval(rule)
+		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(attribution, attribution)})
 		return true, nil
 	}
 
 	// Check user-managed saved approval rules.
 	if rule := m.checkSavedApprovalRules(senderInfo, items, reqType, searchAttrs); rule != nil {
 		LogSavedApprovalRuleMatch(rule, senderInfo, items, reqType, searchAttrs, client)
-		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(NewSavedRuleAutoApproval(rule))})
+		attribution := NewSavedRuleAutoApproval(rule)
+		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(attribution, attribution)})
 		return true, nil
 	}
 
 	// Check persistent approve rules from config.
 	if rule := m.CheckTrustRulesByAction(senderInfo, items, reqType, searchAttrs, "approve"); rule != nil {
-		action := ruleAction(rule)
-		slog.Info("trust rule matched",
-			"rule_name", rule.Name,
-			"action", action)
-		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(autoApprovalFromTrustRule(rule))})
+		attribution := NewTrustRuleAttribution(rule)
+		LogTrustRuleMatch(rule, senderInfo, items, reqType, searchAttrs, client)
+		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(attribution, attribution)})
 		return true, nil
 	}
 

@@ -1625,6 +1625,12 @@ func TestTrustRules_RequireApproval_Approve(t *testing.T) {
 	if len(history) != 1 || history[0].Resolution != ResolutionAutoApproved {
 		t.Errorf("expected auto_approved in history, got %v", history)
 	}
+	if history[0].Request.Rule == nil || history[0].Request.Rule.Source != "config_rule" || history[0].Request.Rule.Action != "approve" || history[0].Request.Rule.RuleName != "approve-gh" {
+		t.Errorf("expected config rule attribution for approval, got %#v", history[0].Request.Rule)
+	}
+	if history[0].Request.AutoApproval == nil || history[0].Request.AutoApproval.RuleName != "approve-gh" {
+		t.Errorf("expected auto-approval attribution for approval, got %#v", history[0].Request.AutoApproval)
+	}
 
 	mgr.Unsubscribe(obs)
 }
@@ -1671,6 +1677,12 @@ func TestTrustRules_RequireApproval_Ignore(t *testing.T) {
 	if len(history) != 1 || history[0].Resolution != ResolutionIgnored {
 		t.Errorf("expected ignored in history, got %v", history)
 	}
+	if history[0].Request.Rule == nil || history[0].Request.Rule.Source != "config_rule" || history[0].Request.Rule.Action != "ignore" || history[0].Request.Rule.RuleName != "ignore-chrome" {
+		t.Errorf("expected config rule attribution for ignore, got %#v", history[0].Request.Rule)
+	}
+	if history[0].Request.AutoApproval != nil {
+		t.Errorf("expected no auto-approval attribution for ignore, got %#v", history[0].Request.AutoApproval)
+	}
 
 	mgr.Unsubscribe(obs)
 }
@@ -1711,6 +1723,12 @@ func TestTrustRules_RequireApproval_Deny(t *testing.T) {
 	history := mgr.History()
 	if len(history) != 1 || history[0].Resolution != ResolutionDenied {
 		t.Errorf("expected denied in history, got %v", history)
+	}
+	if history[0].Request.Rule == nil || history[0].Request.Rule.Source != "config_rule" || history[0].Request.Rule.Action != "deny" || history[0].Request.Rule.RuleName != "deny-epiphany" {
+		t.Errorf("expected config rule attribution for deny, got %#v", history[0].Request.Rule)
+	}
+	if history[0].Request.AutoApproval != nil {
+		t.Errorf("expected no auto-approval attribution for deny, got %#v", history[0].Request.AutoApproval)
 	}
 
 	mgr.Unsubscribe(obs)

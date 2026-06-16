@@ -42,6 +42,7 @@ export interface PendingRequest {
   type: "get_secret" | "search" | "gpg_sign" | "delete" | "write" | "unlock" | "ssh_sign";
   search_attributes?: Record<string, string>;
   sender_info: SenderInfo;
+  rule?: RuleAttribution;
   auto_approval?: AutoApprovalInfo;
   gpg_sign_info?: GPGSignInfo;
 }
@@ -116,8 +117,9 @@ export interface SecretMatcher {
   attributes?: Record<string, string>;
 }
 
-export interface AutoApprovalInfo {
+export interface RuleAttribution {
   source: string;
+  action?: string;
   rule_id?: string;
   rule_name?: string;
   rule_request_types?: string[];
@@ -125,6 +127,8 @@ export interface AutoApprovalInfo {
   secret?: SecretMatcher;
   search_attributes?: Record<string, string>;
 }
+
+export type AutoApprovalInfo = RuleAttribution;
 
 export interface TrustRule {
   name?: string;

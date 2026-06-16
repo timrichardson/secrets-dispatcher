@@ -60,6 +60,7 @@ type PendingRequest struct {
 	Type             string                     `json:"type"`
 	SearchAttributes map[string]string          `json:"search_attributes,omitempty"`
 	SenderInfo       SenderInfo                 `json:"sender_info"`
+	Rule             *approval.RuleAttribution  `json:"rule,omitempty"`
 	AutoApproval     *approval.AutoApprovalInfo `json:"auto_approval,omitempty"`
 	GPGSignInfo      *approval.GPGSignInfo      `json:"gpg_sign_info,omitempty"`
 }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { HistoryEntry as HistoryEntryType, PendingRequest, AutoApproveRule, SavedApprovalRule } from "./types";
+  import type { HistoryEntry as HistoryEntryType, PendingRequest, AutoApproveRule, SavedApprovalRule, RuleAttribution } from "./types";
   import ProcessChain from "./ProcessChain.svelte";
   import PropsTable from "./PropsTable.svelte";
 
@@ -147,12 +147,25 @@
     }
   }
 
-  function autoApprovalLabel(entry: HistoryEntryType): string {
-    const info = entry.request.auto_approval;
+  function requestRuleAttribution(entry: HistoryEntryType): RuleAttribution | undefined {
+    return entry.request.rule ?? entry.request.auto_approval;
+  }
+
+  function ruleAttributionLabel(entry: HistoryEntryType): string {
+    const info = requestRuleAttribution(entry);
     if (!info) return "";
     const name = info.rule_name || info.rule_id || sourceLabel(info.source);
     const suffix = info.rule_id && info.rule_name ? ` (${info.rule_id.slice(0, 8)})` : "";
     return `${sourceLabel(info.source)}: ${name}${suffix}`;
+  }
+
+  function ruleAttributionPrefix(entry: HistoryEntryType): string {
+    switch (entry.resolution) {
+      case "denied": return "Denied by";
+      case "ignored": return "Ignored by";
+      case "auto_approved": return "Auto-approved by";
+      default: return "Resolved by";
+    }
   }
 </script>
 
@@ -189,8 +202,8 @@
     <ProcessChain chain={entry.request.sender_info?.process_chain ?? []} fallbackText={formatSenderInfo(entry)} />
   </div>
   <PropsTable {...historyEntryProps(entry.request)} />
-  {#if entry.request.auto_approval}
-    <div class="auto-approval-source">Auto-approved by {autoApprovalLabel(entry)}</div>
+  {#if requestRuleAttribution(entry)}
+    <div class="rule-attribution-source">{ruleAttributionPrefix(entry)} {ruleAttributionLabel(entry)}</div>
   {/if}
   {#if entry.resolution === "cancelled"}
     <button
@@ -342,7 +355,7 @@
     white-space: nowrap;
   }
 
-  .auto-approval-source {
+  .rule-attribution-source {
     font-size: 12px;
     color: var(--color-primary);
     background-color: rgba(59, 130, 246, 0.08);

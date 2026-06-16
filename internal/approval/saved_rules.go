@@ -422,6 +422,7 @@ func NewTemporaryRuleAutoApproval(rule *AutoApproveRule) *AutoApprovalInfo {
 	}
 	info := &AutoApprovalInfo{
 		Source:           "temporary_rule",
+		Action:           "approve",
 		RuleID:           rule.ID,
 		RuleRequestTypes: []string{string(rule.RequestType)},
 		Process:          &ProcessMatcher{Unit: rule.InvokerName},
@@ -445,6 +446,7 @@ func NewSavedRuleAutoApproval(rule *SavedApprovalRule) *AutoApprovalInfo {
 	cloned := cloneSavedApprovalRule(*rule)
 	return &AutoApprovalInfo{
 		Source:           "saved_rule",
+		Action:           "approve",
 		RuleID:           cloned.ID,
 		RuleName:         cloned.Name,
 		RuleRequestTypes: cloned.RequestTypes,
@@ -454,12 +456,14 @@ func NewSavedRuleAutoApproval(rule *SavedApprovalRule) *AutoApprovalInfo {
 	}
 }
 
-func autoApprovalFromTrustRule(rule *TrustRule) *AutoApprovalInfo {
+// NewTrustRuleAttribution returns history attribution for a config trust-rule match.
+func NewTrustRuleAttribution(rule *TrustRule) *RuleAttribution {
 	if rule == nil {
 		return nil
 	}
-	info := &AutoApprovalInfo{
+	info := &RuleAttribution{
 		Source:           "config_rule",
+		Action:           ruleAction(rule),
 		RuleName:         rule.Name,
 		RuleRequestTypes: slices.Clone(rule.RequestTypes),
 		SearchAttributes: cloneStringMap(rule.SearchAttributes),
@@ -476,7 +480,7 @@ func autoApprovalFromTrustRule(rule *TrustRule) *AutoApprovalInfo {
 	return info
 }
 
-func cloneAutoApprovalInfo(info *AutoApprovalInfo) *AutoApprovalInfo {
+func cloneRuleAttribution(info *RuleAttribution) *RuleAttribution {
 	if info == nil {
 		return nil
 	}
@@ -495,6 +499,10 @@ func cloneAutoApprovalInfo(info *AutoApprovalInfo) *AutoApprovalInfo {
 	return &out
 }
 
+func cloneAutoApprovalInfo(info *AutoApprovalInfo) *AutoApprovalInfo {
+	return cloneRuleAttribution(info)
+}
+
 // LogSavedApprovalRuleMatch logs the saved rule and request fields that matched.
 func LogSavedApprovalRuleMatch(rule *SavedApprovalRule, senderInfo SenderInfo, items []ItemInfo, reqType RequestType, searchAttrs map[string]string, client string) {
 	attrs := map[string]string{}
@@ -511,6 +519,40 @@ func LogSavedApprovalRuleMatch(rule *SavedApprovalRule, senderInfo SenderInfo, i
 		"rule_id", rule.ID,
 		"rule_name", rule.Name,
 		"rule_enabled", rule.Enabled,
+		"rule_request_types", rule.RequestTypes,
+		"rule_process", rule.Process,
+		"rule_secret", rule.Secret,
+		"rule_search_attributes", rule.SearchAttributes,
+		"request_client", client,
+		"request_type", reqType,
+		"request_sender", senderInfo.Sender,
+		"request_pid", senderInfo.PID,
+		"request_uid", senderInfo.UID,
+		"request_invoker", senderInfo.UnitName,
+		"request_process_chain", senderInfo.ProcessChain,
+		"request_collection", collection,
+		"request_label", label,
+		"request_path", pathValue,
+		"request_attributes", attrs,
+		"request_search_attributes", searchAttrs,
+	)
+}
+
+// LogTrustRuleMatch logs the config rule and request fields that matched.
+func LogTrustRuleMatch(rule *TrustRule, senderInfo SenderInfo, items []ItemInfo, reqType RequestType, searchAttrs map[string]string, client string) {
+	attrs := map[string]string{}
+	label := ""
+	pathValue := ""
+	collection := ""
+	if len(items) > 0 {
+		attrs = items[0].Attributes
+		label = items[0].Label
+		pathValue = items[0].Path
+		collection = extractCollection(items[0].Path)
+	}
+	slog.Info("trust rule matched",
+		"rule_name", rule.Name,
+		"rule_action", ruleAction(rule),
 		"rule_request_types", rule.RequestTypes,
 		"rule_process", rule.Process,
 		"rule_secret", rule.Secret,

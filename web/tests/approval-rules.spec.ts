@@ -357,4 +357,70 @@ test.describe("Saved Approval Rules UI", () => {
       ),
     ).toBeVisible();
   });
+
+  test("recent history shows denied config rule attribution", async ({ page }) => {
+    const now = new Date().toISOString();
+
+    await page.routeWebSocket(`**/api/v1/ws`, (ws) => {
+      const server = ws.connectToServer();
+      server.onMessage((message) => {
+        if (typeof message === "string") {
+          try {
+            const parsed = JSON.parse(message);
+            if (parsed.type === "snapshot") {
+              parsed.history = [
+                {
+                  request: {
+                    id: "config-rule-denied-history",
+                    client: "test-client",
+                    items: [
+                      {
+                        path: "/org/freedesktop/secrets/collection/login/item4",
+                        label: "Denied rule token",
+                        attributes: { service: "browser" },
+                      },
+                    ],
+                    session: "/org/freedesktop/secrets/session/4",
+                    created_at: now,
+                    expires_at: now,
+                    type: "get_secret",
+                    sender_info: {
+                      sender: ":1.77",
+                      pid: 7777,
+                      uid: 1000,
+                      user_name: "testuser",
+                      unit_name: "denied-invoker",
+                    },
+                    rule: {
+                      source: "config_rule",
+                      action: "deny",
+                      rule_name: "Deny browser tokens",
+                      rule_request_types: ["get_secret"],
+                      process: { unit: "denied-invoker" },
+                      secret: { collection: "login" },
+                    },
+                  },
+                  resolution: "denied",
+                  resolved_at: now,
+                },
+              ];
+              ws.send(JSON.stringify(parsed));
+              return;
+            }
+          } catch { /* not JSON */ }
+        }
+        ws.send(message);
+      });
+    });
+
+    await page.goto(await backend.generateLoginURL());
+
+    await expect(page.getByText("Recent Activity")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByText("Denied rule token")).toBeVisible();
+    await expect(
+      page.getByText("Denied by config rule: Deny browser tokens"),
+    ).toBeVisible();
+  });
 });

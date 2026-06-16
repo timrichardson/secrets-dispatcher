@@ -182,7 +182,7 @@ For Secret Service requests, "similar" means all of these match:
 
 If you choose `Save rule` after `Approve similar`, secrets-dispatcher promotes that temporary rule into a saved approval rule. Saved approval rules are stored in the state directory as `approval-rules.json`, survive restarts, and remain active until disabled or deleted in the Web UI. Configured `deny` and `ignore` trust rules still take precedence over saved approval rules.
 
-Auto-approved requests appear in history as `auto_approved`. When a saved, temporary, or config rule caused the approval, history includes the rule source, name, and ID where available.
+Auto-approved requests appear in history as `auto_approved`. When a saved, temporary, or config rule caused the request to be approved, denied, or ignored, history includes the rule source, action, name, and ID where available.
 
 ## Trust Rules
 

@@ -54,7 +54,7 @@ type ItemInfo struct {
 	Attributes map[string]string `json:"attributes"`
 }
 
-// ProcessMatcher describes process fields that matched an auto-approval rule.
+// ProcessMatcher describes process fields that matched a rule.
 type ProcessMatcher struct {
 	Exe  string `json:"exe,omitempty"`
 	Name string `json:"name,omitempty"`
@@ -62,16 +62,17 @@ type ProcessMatcher struct {
 	Unit string `json:"unit,omitempty"`
 }
 
-// SecretMatcher describes secret fields that matched an auto-approval rule.
+// SecretMatcher describes secret fields that matched a rule.
 type SecretMatcher struct {
 	Collection string            `json:"collection,omitempty"`
 	Label      string            `json:"label,omitempty"`
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
-// AutoApprovalInfo describes why a request was auto-approved.
-type AutoApprovalInfo struct {
+// RuleAttribution describes the rule or trusted source that resolved a request.
+type RuleAttribution struct {
 	Source           string            `json:"source"`
+	Action           string            `json:"action,omitempty"`
 	RuleID           string            `json:"rule_id,omitempty"`
 	RuleName         string            `json:"rule_name,omitempty"`
 	RuleRequestTypes []string          `json:"rule_request_types,omitempty"`
@@ -79,6 +80,9 @@ type AutoApprovalInfo struct {
 	Secret           *SecretMatcher    `json:"secret,omitempty"`
 	SearchAttributes map[string]string `json:"search_attributes,omitempty"`
 }
+
+// AutoApprovalInfo is kept as the JSON model for requests auto-approved by a rule/source.
+type AutoApprovalInfo = RuleAttribution
 
 // GPGSignInfo carries commit context for a gpg_sign approval request.
 // This is an intentional duplication of approval.GPGSignInfo — the cli package
@@ -106,6 +110,7 @@ type PendingRequest struct {
 	SearchAttributes map[string]string `json:"search_attributes,omitempty"`
 	GPGSignInfo      *GPGSignInfo      `json:"gpg_sign_info,omitempty"`
 	SenderInfo       SenderInfo        `json:"sender_info"`
+	Rule             *RuleAttribution  `json:"rule,omitempty"`
 	AutoApproval     *AutoApprovalInfo `json:"auto_approval,omitempty"`
 }
 
