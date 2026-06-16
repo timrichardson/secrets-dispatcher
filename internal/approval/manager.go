@@ -43,13 +43,17 @@ const (
 	EventRequestIgnored
 	EventAutoApproveRuleAdded
 	EventAutoApproveRuleRemoved
+	EventSavedApprovalRuleAdded
+	EventSavedApprovalRuleUpdated
+	EventSavedApprovalRuleRemoved
 )
 
 // Event represents an approval event for observers.
 type Event struct {
-	Type    EventType
-	Request *Request
-	Rule    *AutoApproveRule // For EventAutoApproveRuleAdded/Removed
+	Type      EventType
+	Request   *Request
+	Rule      *AutoApproveRule   // For EventAutoApproveRuleAdded/Removed
+	SavedRule *SavedApprovalRule // For EventSavedApprovalRuleAdded/Updated/Removed
 }
 
 // Observer receives notifications about approval events.
@@ -194,6 +198,10 @@ type Manager struct {
 	trustedSigners      []TrustedSigner // exe+repo combos auto-approved for gpg_sign
 	ignoreChromeDummy   bool
 	trustRules          []TrustRule // persistent config-defined trust rules
+
+	savedRulesMu    sync.Mutex
+	savedRules      []SavedApprovalRule
+	savedRulesStore SavedApprovalRuleStore
 }
 
 // ManagerConfig holds configuration for the approval Manager.
@@ -214,6 +222,10 @@ type ManagerConfig struct {
 	IgnoreChromeDummy bool
 	// TrustRules are persistent config-defined rules for auto-approve/ignore.
 	TrustRules []TrustRule
+	// SavedApprovalRules are user-managed, state-file backed approve rules.
+	SavedApprovalRules []SavedApprovalRule
+	// SavedRulesStore persists user-managed approval rules. Nil keeps them in memory only.
+	SavedRulesStore SavedApprovalRuleStore
 }
 
 // NewManager creates a new approval manager.
@@ -229,6 +241,8 @@ func NewManager(cfg ManagerConfig) *Manager {
 		trustedSigners:      cfg.TrustedSigners,
 		ignoreChromeDummy:   cfg.IgnoreChromeDummy,
 		trustRules:          cfg.TrustRules,
+		savedRules:          append([]SavedApprovalRule{}, cfg.SavedApprovalRules...),
+		savedRulesStore:     cfg.SavedRulesStore,
 	}
 }
 
@@ -267,7 +281,10 @@ func (m *Manager) notify(event Event) {
 	// Record history for terminal request events (not rule-management events)
 	if event.Type != EventRequestCreated &&
 		event.Type != EventAutoApproveRuleAdded &&
-		event.Type != EventAutoApproveRuleRemoved {
+		event.Type != EventAutoApproveRuleRemoved &&
+		event.Type != EventSavedApprovalRuleAdded &&
+		event.Type != EventSavedApprovalRuleUpdated &&
+		event.Type != EventSavedApprovalRuleRemoved {
 		m.addHistory(event)
 	}
 }
@@ -369,6 +386,20 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 		}
 	}
 
+	// Hard config policy rules must win over every user-managed or cached approval.
+	if rule := m.CheckTrustRulesByAction(senderInfo, items, reqType, searchAttrs, "ignore", "deny"); rule != nil {
+		action := ruleAction(rule)
+		attribution := NewTrustDecisionAttribution(rule)
+		LogTrustRuleMatch(rule, senderInfo, items, reqType, searchAttrs, client)
+		req := newResolvedRequest(attribution)
+		if action == "ignore" {
+			m.notify(Event{Type: EventRequestIgnored, Request: req})
+			return true, ErrIgnored
+		}
+		m.notify(Event{Type: EventRequestDenied, Request: req})
+		return true, ErrDeniedByRule
+	}
+
 	// Check approval cache: if all items were recently approved for this sender, skip.
 	// Delete and write requests always require explicit approval — never use cached approvals.
 	if reqType != RequestTypeDelete && reqType != RequestTypeWrite && m.approvalWindow > 0 && len(items) > 0 {
@@ -387,21 +418,21 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 		return true, nil
 	}
 
-	// Check persistent trust rules from config.
-	if rule := m.CheckTrustRules(senderInfo, items, reqType, searchAttrs); rule != nil {
-		action := ruleAction(rule)
+	// Check user-managed saved approval rules.
+	if rule := m.checkSavedApprovalRules(senderInfo, items, reqType, searchAttrs); rule != nil {
+		slog.Info("saved approval rule matched",
+			"rule_id", rule.ID,
+			"rule_name", rule.Name,
+			"type", reqType)
+		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(nil)})
+		return true, nil
+	}
+
+	// Check persistent approve rules from config.
+	if rule := m.CheckTrustRulesByAction(senderInfo, items, reqType, searchAttrs, "approve"); rule != nil {
 		attribution := NewTrustDecisionAttribution(rule)
 		LogTrustRuleMatch(rule, senderInfo, items, reqType, searchAttrs, client)
-		req := newResolvedRequest(attribution)
-		if action == "ignore" {
-			m.notify(Event{Type: EventRequestIgnored, Request: req})
-			return true, ErrIgnored
-		}
-		if action == "deny" {
-			m.notify(Event{Type: EventRequestDenied, Request: req})
-			return true, ErrDeniedByRule
-		}
-		m.notify(Event{Type: EventRequestAutoApproved, Request: req})
+		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(attribution)})
 		return true, nil
 	}
 
@@ -1070,6 +1101,22 @@ func invokerExePath(s SenderInfo) string {
 func (m *Manager) CheckTrustRules(senderInfo SenderInfo, items []ItemInfo, reqType RequestType, searchAttrs map[string]string) *TrustRule {
 	for i := range m.trustRules {
 		rule := &m.trustRules[i]
+		if !matchTrustRule(rule, senderInfo, items, reqType, searchAttrs) {
+			continue
+		}
+		return rule
+	}
+	return nil
+}
+
+// CheckTrustRulesByAction returns the first configured trust rule whose action is in actions.
+// Empty action is treated as "approve".
+func (m *Manager) CheckTrustRulesByAction(senderInfo SenderInfo, items []ItemInfo, reqType RequestType, searchAttrs map[string]string, actions ...string) *TrustRule {
+	for i := range m.trustRules {
+		rule := &m.trustRules[i]
+		if !slices.Contains(actions, ruleAction(rule)) {
+			continue
+		}
 		if !matchTrustRule(rule, senderInfo, items, reqType, searchAttrs) {
 			continue
 		}

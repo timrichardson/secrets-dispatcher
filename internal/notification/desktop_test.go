@@ -91,10 +91,11 @@ func (m *mockNotifier) lastClosed() uint32 {
 
 // mockApprover records approve/deny calls.
 type mockApprover struct {
-	mu       sync.Mutex
-	approved []string
-	denied   []string
-	err      error
+	mu         sync.Mutex
+	approved   []string
+	denied     []string
+	savedRules []string
+	err        error
 }
 
 func (a *mockApprover) Approve(id string) error {
@@ -134,6 +135,16 @@ func (a *mockApprover) ApproveAndAutoApprove(id string) error {
 		return a.err
 	}
 	a.approved = append(a.approved, "approve_auto:"+id)
+	return nil
+}
+
+func (a *mockApprover) CreateSavedRuleFromRequest(requestID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.err != nil {
+		return a.err
+	}
+	a.savedRules = append(a.savedRules, requestID)
 	return nil
 }
 
@@ -639,6 +650,44 @@ func TestHandler_ListenActions_Approve(t *testing.T) {
 	defer approver.mu.Unlock()
 	if len(approver.approved) != 1 || approver.approved[0] != "action-approve-1" {
 		t.Errorf("expected approve for 'action-approve-1', got %v", approver.approved)
+	}
+}
+
+func TestHandler_ApproveSimilarFollowUp_SaveRule(t *testing.T) {
+	h, mock, approver := newTestHandler()
+
+	req := &approval.Request{
+		ID:     "action-save-rule-1",
+		Client: "user@host",
+		Type:   approval.RequestTypeGetSecret,
+		Items:  []approval.ItemInfo{{Label: "Secret"}},
+	}
+
+	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: req})
+	h.mu.Lock()
+	nID := h.notifications[req.ID]
+	h.mu.Unlock()
+
+	h.handleAction(Action{NotificationID: nID, ActionKey: "approve_and_auto_approve"})
+	if mock.notifyCount() != 2 {
+		t.Fatalf("expected original and follow-up notification, got %d", mock.notifyCount())
+	}
+
+	var followUpID uint32
+	h.mu.Lock()
+	for id := range h.rulePrompts {
+		followUpID = id
+	}
+	h.mu.Unlock()
+	if followUpID == 0 {
+		t.Fatal("follow-up notification was not tracked")
+	}
+
+	h.handleAction(Action{NotificationID: followUpID, ActionKey: "save_rule"})
+	approver.mu.Lock()
+	defer approver.mu.Unlock()
+	if len(approver.savedRules) != 1 || approver.savedRules[0] != req.ID {
+		t.Fatalf("savedRules = %v, want [%s]", approver.savedRules, req.ID)
 	}
 }
 

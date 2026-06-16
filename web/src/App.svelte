@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { PendingRequest, AuthState, ClientInfo, HistoryEntry, AutoApproveRule, TrustedSigner, TrustRule } from "./lib/types";
-  import { exchangeToken, getStatus, createAutoApprove, deleteAutoApproveRule } from "./lib/api";
+  import type { PendingRequest, AuthState, ClientInfo, HistoryEntry, AutoApproveRule, SavedApprovalRule, TrustedSigner, TrustRule } from "./lib/types";
+  import { exchangeToken, getStatus, createAutoApprove, createApprovalRuleFromRequest, deleteApprovalRule, deleteAutoApproveRule, persistAutoApproveRule, updateApprovalRule } from "./lib/api";
   import { ApprovalWebSocket } from "./lib/websocket";
   import RequestCard from "./lib/RequestCard.svelte";
   import HistoryEntryCard from "./lib/HistoryEntry.svelte";
@@ -13,6 +13,7 @@
   let clients = $state<ClientInfo[]>([]);
   let history = $state<HistoryEntry[]>([]);
   let autoApproveRules = $state<AutoApproveRule[]>([]);
+  let approvalRules = $state<SavedApprovalRule[]>([]);
   let trustedSigners = $state<TrustedSigner[]>([]);
   let trustRules = $state<TrustRule[]>([]);
   let loading = $state(true);
@@ -20,6 +21,7 @@
   let connected = $state(false);
   let sidebarOpen = $state(false);
   let historyOpen = $state(true);
+  let approvalRulesOpen = $state(localStorage.getItem('approvalRulesOpen') === 'true');
   let trustRulesOpen = $state(localStorage.getItem('trustRulesOpen') === 'true');
   let version = $state("");
   let useAbsoluteTime = $state(localStorage.getItem('timeFormat') === 'absolute');
@@ -38,6 +40,10 @@
 
   // Tick counter for auto-approve rule timer display (increments every second)
   let tick = $state(0);
+
+  let editingRule = $state<SavedApprovalRule | null>(null);
+  let ruleDraft = $state("");
+  let ruleEditorError = $state<string | null>(null);
 
   function cancelPendingNotification(id: string) {
     const timer = pendingNotifications.get(id);
@@ -73,12 +79,13 @@
 
   function startWebSocket() {
     ws = new ApprovalWebSocket({
-      onSnapshot: (reqs, cls, hist, ver, rules, signers, tRules, aaDuration, notifDelay) => {
+      onSnapshot: (reqs, cls, hist, ver, rules, savedRules, signers, tRules, aaDuration, notifDelay) => {
         requests = reqs;
         clients = cls;
         history = hist;
         version = ver;
         autoApproveRules = rules;
+        approvalRules = savedRules;
         trustedSigners = signers;
         trustRules = tRules;
         autoApproveDurationSeconds = aaDuration;
@@ -140,6 +147,27 @@
       onAutoApproveRuleRemoved: (id) => {
         autoApproveRules = autoApproveRules.filter(r => r.id !== id);
       },
+      onApprovalRuleAdded: (rule) => {
+        const idx = approvalRules.findIndex(r => r.id === rule.id);
+        if (idx >= 0) {
+          approvalRules[idx] = rule;
+          approvalRules = approvalRules;
+        } else {
+          approvalRules = [...approvalRules, rule];
+        }
+      },
+      onApprovalRuleUpdated: (rule) => {
+        const idx = approvalRules.findIndex(r => r.id === rule.id);
+        if (idx >= 0) {
+          approvalRules[idx] = rule;
+          approvalRules = approvalRules;
+        } else {
+          approvalRules = [...approvalRules, rule];
+        }
+      },
+      onApprovalRuleRemoved: (id) => {
+        approvalRules = approvalRules.filter(r => r.id !== id);
+      },
       onConnectionChange: (isConnected) => {
         connected = isConnected;
         if (!isConnected) {
@@ -171,6 +199,10 @@
 
     // Check for single-request mode (opened from desktop notification)
     focusRequestId = params.get("request");
+    if (params.get("view") === "rules") {
+      approvalRulesOpen = true;
+      localStorage.setItem('approvalRulesOpen', 'true');
+    }
 
     if (token) {
       // Exchange JWT for session cookie
@@ -219,6 +251,11 @@
 
   function toggleHistory() {
     historyOpen = !historyOpen;
+  }
+
+  function toggleApprovalRules() {
+    approvalRulesOpen = !approvalRulesOpen;
+    localStorage.setItem('approvalRulesOpen', approvalRulesOpen ? 'true' : 'false');
   }
 
   function toggleTrustRules() {
@@ -282,9 +319,104 @@
     }
   }
 
+  async function handlePersistRule(ruleId: string) {
+    try {
+      await persistAutoApproveRule(ruleId);
+      autoApproveRules = autoApproveRules.filter(r => r.id !== ruleId);
+    } catch {
+      // Ignore; websocket/state will correct stale UI.
+    }
+  }
+
+  async function handleSaveRuleFromRequest(requestId: string) {
+    try {
+      await createApprovalRuleFromRequest(requestId);
+      approvalRulesOpen = true;
+      localStorage.setItem('approvalRulesOpen', 'true');
+    } catch {
+      // Ignore errors silently for now.
+    }
+  }
+
+  async function handleDeleteApprovalRule(ruleId: string) {
+    try {
+      await deleteApprovalRule(ruleId);
+      approvalRules = approvalRules.filter(r => r.id !== ruleId);
+    } catch {
+      // Ignore; websocket/state will correct stale UI.
+    }
+  }
+
+  async function handleToggleApprovalRule(rule: SavedApprovalRule) {
+    try {
+      await updateApprovalRule(rule.id, { ...rule, enabled: !rule.enabled });
+    } catch {
+      // Ignore.
+    }
+  }
+
+  function startEditRule(rule: SavedApprovalRule) {
+    editingRule = rule;
+    ruleEditorError = null;
+    ruleDraft = JSON.stringify({
+      name: rule.name,
+      enabled: rule.enabled,
+      request_types: rule.request_types,
+      process: rule.process,
+      secret: rule.secret,
+      search_attributes: rule.search_attributes,
+    }, null, 2);
+  }
+
+  function cancelEditRule() {
+    editingRule = null;
+    ruleDraft = "";
+    ruleEditorError = null;
+  }
+
+  async function saveEditedRule() {
+    if (!editingRule) return;
+    try {
+      const parsed = JSON.parse(ruleDraft) as SavedApprovalRule;
+      await updateApprovalRule(editingRule.id, { ...editingRule, ...parsed, id: editingRule.id });
+      cancelEditRule();
+    } catch (e) {
+      if (e instanceof Error) {
+        ruleEditorError = e.message;
+      } else {
+        ruleEditorError = "Failed to save rule";
+      }
+    }
+  }
+
   function basename(path: string): string {
     const slash = path.lastIndexOf("/");
     return slash >= 0 ? path.slice(slash + 1) : path;
+  }
+
+  function requestTypeLabel(type: string): string {
+    switch (type) {
+      case "gpg_sign": return "GPG Sign";
+      case "ssh_sign": return "SSH Sign";
+      case "get_secret": return "Secret";
+      case "search": return "Search";
+      case "delete": return "Delete";
+      case "write": return "Write";
+      case "unlock": return "Unlock";
+      default: return type;
+    }
+  }
+
+  function savedRuleProcess(rule: SavedApprovalRule): string | undefined {
+    return rule.process?.unit ?? rule.process?.name ?? rule.process?.exe ?? rule.process?.cwd;
+  }
+
+  function savedRuleCollection(rule: SavedApprovalRule): string | undefined {
+    return rule.secret?.collection;
+  }
+
+  function savedRuleAttributes(rule: SavedApprovalRule): Record<string, string> | undefined {
+    return rule.secret?.attributes ?? rule.search_attributes;
   }
 
   function formatRuleExpiry(expiresAt: string, _tick: number): string {
@@ -382,7 +514,7 @@
           </ul>
         {/if}
       </div>
-      {#if autoApproveRules.length > 0 || trustedSigners.length > 0}
+      {#if autoApproveRules.length > 0 || approvalRules.length > 0 || trustedSigners.length > 0}
         <div class="sidebar-rules">
           <h3>Auto-Approve Rules</h3>
           <ul class="rules-list">
@@ -413,6 +545,18 @@
                   </div>
                 </div>
                 <PropsTable process={rule.invoker_name} collection={rule.collection} attributes={rule.attributes} />
+              </li>
+            {/each}
+            {#each approvalRules as rule (rule.id)}
+              <li class="rule-entry" class:rule-disabled={!rule.enabled}>
+                <div class="rule-header">
+                  <span class="history-type history-type--{rule.request_types[0] ?? 'get_secret'}">
+                    {rule.request_types.map(requestTypeLabel).join(', ')}
+                  </span>
+                  <span class="rule-permanent">saved</span>
+                </div>
+                <PropsTable process={savedRuleProcess(rule)} collection={savedRuleCollection(rule)} attributes={savedRuleAttributes(rule)} />
+                <div class="rule-name">{rule.name}</div>
               </li>
             {/each}
           </ul>
@@ -531,7 +675,7 @@
             {#if historyOpen}
               <ul class="history-list">
                 {#each groupedHistory as group (group.entry.request.id + group.entry.resolved_at)}
-                  <HistoryEntryCard entry={group.entry} count={group.count} {tick} {autoApproveRules} {formatTime} {toggleTimeFormat} onAutoApprove={handleAutoApprove} />
+                  <HistoryEntryCard entry={group.entry} count={group.count} {tick} {autoApproveRules} {approvalRules} {formatTime} {toggleTimeFormat} onAutoApprove={handleAutoApprove} onSaveRule={handleSaveRuleFromRequest} />
                 {/each}
               </ul>
             {/if}
@@ -556,12 +700,99 @@
             {#if historyOpen}
               <ul class="history-list">
                 {#each groupedHistory as group (group.entry.request.id + group.entry.resolved_at)}
-                  <HistoryEntryCard entry={group.entry} count={group.count} {tick} {autoApproveRules} {formatTime} {toggleTimeFormat} onAutoApprove={handleAutoApprove} />
+                  <HistoryEntryCard entry={group.entry} count={group.count} {tick} {autoApproveRules} {approvalRules} {formatTime} {toggleTimeFormat} onAutoApprove={handleAutoApprove} onSaveRule={handleSaveRuleFromRequest} />
                 {/each}
               </ul>
             {/if}
           </section>
         {/if}
+      {/if}
+
+      {#if authState === "authenticated" && !loading && !focusRequestId}
+        <section class="approval-rules-section" id="approval-rules">
+          <button class="history-toggle" onclick={toggleApprovalRules}>
+            <h2>Approval Rules ({approvalRules.length} saved, {autoApproveRules.length} temporary)</h2>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class:rotated={!approvalRulesOpen}>
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </button>
+          {#if approvalRulesOpen}
+            <div class="rules-panel">
+              <div class="rules-subsection">
+                <h3>Temporary Rules</h3>
+                {#if autoApproveRules.length === 0}
+                  <p class="rules-empty">No temporary approval rules active.</p>
+                {:else}
+                  <ul class="rules-list">
+                    {#each autoApproveRules as rule (rule.id)}
+                      <li class="rule-entry">
+                        <div class="rule-header">
+                          <span class="history-type history-type--{rule.request_type}">{requestTypeLabel(rule.request_type)}</span>
+                          <div class="rule-header-right">
+                            <span class="rule-expiry">{formatRuleExpiry(rule.expires_at, tick)}</span>
+                            <button class="rule-action" onclick={() => handlePersistRule(rule.id)}>Save</button>
+                            <button class="rule-delete" onclick={() => handleDeleteRule(rule.id)} title="Remove temporary rule">
+                              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                            </button>
+                          </div>
+                        </div>
+                        <PropsTable process={rule.invoker_name} collection={rule.collection} attributes={rule.attributes} />
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+
+              <div class="rules-subsection">
+                <h3>Saved Approval Rules</h3>
+                {#if approvalRules.length === 0}
+                  <p class="rules-empty">No saved approval rules. Use "Approve similar", then save the temporary rule here or from the desktop notification.</p>
+                {:else}
+                  <ul class="rules-list">
+                    {#each approvalRules as rule (rule.id)}
+                      <li class="rule-entry" class:rule-disabled={!rule.enabled}>
+                        <div class="rule-header">
+                          <span class="history-type history-type--{rule.request_types[0] ?? 'get_secret'}">{rule.request_types.map(requestTypeLabel).join(', ')}</span>
+                          <div class="rule-header-right">
+                            <span class="rule-permanent">{rule.enabled ? 'saved' : 'disabled'}</span>
+                            <button class="rule-action" onclick={() => handleToggleApprovalRule(rule)}>{rule.enabled ? 'Disable' : 'Enable'}</button>
+                            <button class="rule-action" onclick={() => startEditRule(rule)}>Edit</button>
+                            <button class="rule-delete" onclick={() => handleDeleteApprovalRule(rule.id)} title="Delete saved rule">
+                              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                            </button>
+                          </div>
+                        </div>
+                        <div class="rule-name">{rule.name}</div>
+                        <PropsTable process={savedRuleProcess(rule)} collection={savedRuleCollection(rule)} attributes={savedRuleAttributes(rule)} />
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+            </div>
+          {/if}
+        </section>
+      {/if}
+
+      {#if editingRule}
+        <button class="rule-editor-backdrop" onclick={cancelEditRule} aria-label="Close rule editor"></button>
+        <section class="rule-editor" aria-label="Edit saved approval rule">
+          <div class="rule-editor-header">
+            <h2>Edit Approval Rule</h2>
+            <button class="rule-delete" onclick={cancelEditRule} title="Close editor">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+          </div>
+          <p class="rule-editor-help">Edit JSON rule fields. Glob patterns are supported in process, collection, label, and attribute values.</p>
+          {#if ruleEditorError}
+            <p class="error-message">{ruleEditorError}</p>
+          {/if}
+          <textarea class="rule-editor-textarea" bind:value={ruleDraft} spellcheck="false"></textarea>
+          <div class="rule-editor-actions">
+            <button class="rule-action" onclick={cancelEditRule}>Cancel</button>
+            <button class="btn-retry" onclick={saveEditedRule}>Save rule</button>
+          </div>
+        </section>
       {/if}
 
       {#if authState === "authenticated" && !loading && !focusRequestId && trustRules.length > 0}
@@ -970,6 +1201,35 @@
     margin-top: 32px;
   }
 
+  .approval-rules-section {
+    margin-top: 32px;
+  }
+
+  .rules-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    margin-top: 16px;
+  }
+
+  .rules-subsection h3 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    margin: 0 0 8px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .rules-empty {
+    padding: 12px;
+    border: 1px dashed var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    font-size: 13px;
+    margin: 0;
+  }
+
   .trust-rules-section .rules-list {
     margin-top: 16px;
   }
@@ -1033,6 +1293,25 @@
     color: var(--color-danger);
   }
 
+  .rule-action {
+    padding: 2px 6px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .rule-action:hover {
+    color: var(--color-text);
+    background: var(--color-surface-hover);
+  }
+
+  .rule-disabled {
+    opacity: 0.62;
+  }
+
   .rule-expiry {
     font-size: 11px;
     color: var(--color-warning);
@@ -1049,6 +1328,67 @@
     color: var(--color-text-muted);
     font-style: italic;
     margin-top: 2px;
+  }
+
+  .rule-editor-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 198;
+    background: rgba(0, 0, 0, 0.35);
+  }
+
+  .rule-editor {
+    position: fixed;
+    z-index: 199;
+    top: 50%;
+    left: 50%;
+    width: min(620px, calc(100vw - 32px));
+    max-height: calc(100vh - 48px);
+    transform: translate(-50%, -50%);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 16px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+  }
+
+  .rule-editor-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+
+  .rule-editor-header h2 {
+    margin: 0;
+    color: var(--color-text);
+  }
+
+  .rule-editor-help {
+    color: var(--color-text-muted);
+    font-size: 13px;
+    margin: 0 0 12px 0;
+  }
+
+  .rule-editor-textarea {
+    width: 100%;
+    min-height: 280px;
+    resize: vertical;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text);
+    font-family: ui-monospace, "SF Mono", Monaco, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 12px;
+  }
+
+  .rule-editor-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
   }
 
   /* Desktop: show sidebar by default, hide toggle */

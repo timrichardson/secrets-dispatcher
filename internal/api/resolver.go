@@ -61,6 +61,12 @@ func (r *Resolver) AutoApprove(requestID string) error {
 	return nil
 }
 
+// CreateSavedRuleFromRequest creates a durable approval rule from a pending or historical request.
+func (r *Resolver) CreateSavedRuleFromRequest(requestID string) error {
+	_, err := r.Manager.CreateSavedApprovalRuleFromRequest(requestID)
+	return err
+}
+
 // ApproveAndAutoApprove approves a pending request and creates an auto-approve
 // rule for similar future requests. For GPG signing requests, it runs the real
 // gpg binary to produce the signature before approving.

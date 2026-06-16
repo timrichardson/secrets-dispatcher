@@ -59,6 +59,27 @@ func newServerWithHandlers(addr string, handlers *Handlers, wsHandler *WSHandler
 	apiMux.HandleFunc("/api/v1/ws", wsHandler.HandleWS)
 	apiMux.HandleFunc("/api/v1/test/history", handlers.HandleTestInjectHistory)
 	apiMux.HandleFunc("/api/v1/gpg-sign/request", handlers.HandleGPGSignRequest)
+	apiMux.HandleFunc("/api/v1/approval-rules/from-request", handlers.HandleSavedApprovalRuleCreateFromRequest)
+	apiMux.HandleFunc("/api/v1/approval-rules", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handlers.HandleSavedApprovalRuleList(w, r)
+		case http.MethodPost:
+			handlers.HandleSavedApprovalRuleCreate(w, r)
+		default:
+			writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	apiMux.HandleFunc("/api/v1/approval-rules/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			handlers.HandleSavedApprovalRuleUpdate(w, r)
+		case http.MethodDelete:
+			handlers.HandleSavedApprovalRuleDelete(w, r)
+		default:
+			writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 	apiMux.HandleFunc("/api/v1/auto-approve", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -69,7 +90,13 @@ func newServerWithHandlers(addr string, handlers *Handlers, wsHandler *WSHandler
 			writeError(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
-	apiMux.HandleFunc("/api/v1/auto-approve/", handlers.HandleAutoApproveDelete)
+	apiMux.HandleFunc("/api/v1/auto-approve/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/persist") {
+			handlers.HandleAutoApprovePersist(w, r)
+			return
+		}
+		handlers.HandleAutoApproveDelete(w, r)
+	})
 
 	// Routes with path parameters need pattern matching
 	apiMux.HandleFunc("/api/v1/pending/", func(w http.ResponseWriter, r *http.Request) {

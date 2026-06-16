@@ -137,6 +137,18 @@ export interface TrustRule {
   search_attributes?: Record<string, string>;
 }
 
+export interface SavedApprovalRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  request_types: string[];
+  process?: ProcessMatcher;
+  secret?: SecretMatcher;
+  search_attributes?: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+}
+
 // WebSocket message types
 export type WSMessage =
   | WSSnapshotMessage
@@ -149,6 +161,9 @@ export type WSMessage =
   | WSHistoryEntryMessage
   | WSAutoApproveRuleAddedMessage
   | WSAutoApproveRuleRemovedMessage
+  | WSSavedApprovalRuleAddedMessage
+  | WSSavedApprovalRuleUpdatedMessage
+  | WSSavedApprovalRuleRemovedMessage
   | WSPingMessage;
 
 export interface WSSnapshotMessage {
@@ -158,6 +173,7 @@ export interface WSSnapshotMessage {
   clients: ClientInfo[];
   history: HistoryEntry[];
   auto_approve_rules: AutoApproveRule[];
+  approval_rules: SavedApprovalRule[];
   trusted_signers: TrustedSigner[];
   trust_rules: TrustRule[];
   auto_approve_duration_seconds?: number;
@@ -207,6 +223,21 @@ export interface WSAutoApproveRuleAddedMessage {
 
 export interface WSAutoApproveRuleRemovedMessage {
   type: "auto_approve_rule_removed";
+  id: string;
+}
+
+export interface WSSavedApprovalRuleAddedMessage {
+  type: "approval_rule_added";
+  approval_rule: SavedApprovalRule;
+}
+
+export interface WSSavedApprovalRuleUpdatedMessage {
+  type: "approval_rule_updated";
+  approval_rule: SavedApprovalRule;
+}
+
+export interface WSSavedApprovalRuleRemovedMessage {
+  type: "approval_rule_removed";
   id: string;
 }
 

@@ -345,6 +345,19 @@ func runServe(args []string) {
 	}
 	slog.SetDefault(slog.New(handler))
 
+	// Resolve the state directory before constructing components that persist state.
+	var stateDir string
+	if *stateDirFlag != "" {
+		stateDir = *stateDirFlag
+	} else {
+		var sdErr error
+		stateDir, sdErr = getStateDir()
+		if sdErr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", sdErr)
+			os.Exit(1)
+		}
+	}
+
 	// Create approval manager
 	var trustedSigners []approval.TrustedSigner
 	for _, ts := range cfg.Serve.TrustedSigners {
@@ -366,6 +379,7 @@ func runServe(args []string) {
 			tr.Process = &approval.ProcessMatcher{
 				Exe:  r.Process.Exe,
 				Name: r.Process.Name,
+				CWD:  r.Process.CWD,
 				Unit: r.Process.Unit,
 			}
 		}
@@ -378,6 +392,12 @@ func runServe(args []string) {
 		}
 		trustRules = append(trustRules, tr)
 	}
+	savedRuleStore := approval.NewFileSavedApprovalRuleStore(stateDir)
+	savedRules, err := savedRuleStore.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading approval rules: %v\n", err)
+		os.Exit(1)
+	}
 	approvalMgr := approval.NewManager(approval.ManagerConfig{
 		Timeout:             *timeout,
 		HistoryMax:          *historyLimit,
@@ -386,6 +406,8 @@ func runServe(args []string) {
 		TrustedSigners:      trustedSigners,
 		IgnoreChromeDummy:   *cfg.Serve.IgnoreChromeDummySecret,
 		TrustRules:          trustRules,
+		SavedApprovalRules:  savedRules,
+		SavedRulesStore:     savedRuleStore,
 	})
 
 	// Set up desktop notifications
@@ -406,19 +428,6 @@ func runServe(args []string) {
 	if desktopNotifier != nil {
 		notifHandler = notification.NewHandler(desktopNotifier, api.NewResolver(approvalMgr, slowUpstreamNotifier, upstreamSlowThreshold), "http://"+*listenAddr, *cfg.Serve.ShowPIDs, approvalMgr.AutoApproveDuration(), time.Duration(cfg.Serve.NotificationDelay))
 		approvalMgr.Subscribe(notifHandler)
-	}
-
-	// Set up state directory for cookie
-	var stateDir string
-	if *stateDirFlag != "" {
-		stateDir = *stateDirFlag
-	} else {
-		var sdErr error
-		stateDir, sdErr = getStateDir()
-		if sdErr != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", sdErr)
-			os.Exit(1)
-		}
 	}
 
 	// Create auth with cookie file
