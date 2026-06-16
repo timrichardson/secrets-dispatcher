@@ -90,8 +90,9 @@ secrets-dispatcher service install --mode local --backend gnome-keyring --start
 
 The preset:
 
-- runs GNOME Keyring behind the private dispatcher D-Bus as:
-  `gnome-keyring-daemon --foreground --components=secrets --control-directory=%t/keyring-dispatcher-backend`
+- runs GNOME Keyring behind a dispatcher-supervised private D-Bus backend; the
+  backend bus address is generated at runtime and is not written to systemd unit
+  files, config, or logs
 - saves the pre-existing GNOME Keyring user-unit enabled/active state in
   `~/.config/secrets-dispatcher/gnome-keyring-units.pre-dispatcher.yaml`
 - masks the public GNOME Keyring user service/socket so they do not steal the
@@ -107,6 +108,18 @@ busctl --user list | grep org.freedesktop.secrets
 ```
 
 If GNOME Keyring appears as the owner, desktop apps are bypassing the proxy.
+
+Security model: this local-user backend design prevents ordinary desktop apps
+from bypassing approval prompts by using GNOME Keyring's public activation path
+or a stable backend socket. It is not a hard sandbox against malicious code that
+already runs as the same Linux user. Same-user malware can often inspect or alter
+user processes, config, binaries, or user systemd units unless additional OS
+sandboxing or a separate service user is used.
+
+For custom local backends, `service install --mode local --backend ...` stores
+the backend command in `serve.backend_command`. The command is executed directly
+without a shell. `%B` expands at runtime to the private per-run backend directory
+and `%R` expands to `$XDG_RUNTIME_DIR`.
 
 To undo the local proxy setup and restore the previous GNOME Keyring state:
 

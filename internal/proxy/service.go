@@ -22,7 +22,9 @@ type Service struct {
 	resolver         *SenderInfoResolver
 	upstreamNotifier UpstreamNotifier
 	slowThreshold    time.Duration
-	prompts          *promptRegistry
+	// Tracks backend prompt paths returned by service-level calls so PromptHandler
+	// can authorize later Prompt/Dismiss calls from the original D-Bus sender.
+	prompts *promptRegistry
 }
 
 // NewService creates a new Service handler.
@@ -186,6 +188,8 @@ func (s *Service) Unlock(msg dbus.Message, objects []dbus.ObjectPath) ([]dbus.Ob
 	senderCtx := UpstreamCallContext{
 		ResolveSender: func() approval.SenderInfo { return s.resolver.Resolve(sender) },
 	}
+	// Resolve object metadata before prompting so approvals and trust rules can
+	// show labels/attributes instead of only backend object paths.
 	infos := s.getUnlockInfo(objects, senderCtx)
 	reqCtx, release := s.tracker.contextForSender(context.Background(), sender)
 	defer release()
@@ -196,6 +200,8 @@ func (s *Service) Unlock(msg dbus.Message, objects []dbus.ObjectPath) ([]dbus.Ob
 		s.approval.RecordDeniedByRule(s.clientName, infos, "", approval.RequestTypeUnlock, nil, senderInfo, rule)
 		return nil, "/", dbustypes.ErrAccessDenied("denied by trust rule: " + rule.Name)
 	}
+	// Unlock can expose decrypted secret material through later GetSecrets calls,
+	// so route it through the normal approval pipeline instead of deny-only passthrough.
 	if _, err := s.approval.RequireApproval(reqCtx, s.clientName, infos, "", approval.RequestTypeUnlock, nil, senderInfo); err != nil {
 		return nil, "/", dbustypes.ErrAccessDenied(err.Error())
 	}
@@ -220,6 +226,8 @@ func (s *Service) Unlock(msg dbus.Message, objects []dbus.ObjectPath) ([]dbus.Ob
 
 	objStrs := objectPathsToStrings(objects)
 	s.logger.LogUnlock(context.Background(), objStrs, len(unlocked), "ok", nil)
+	// Backends may return a prompt object; bind it to the original caller so
+	// only that D-Bus sender can drive the forwarded Prompt/Dismiss methods.
 	s.prompts.register(prompt, sender)
 	return unlocked, prompt, nil
 }
@@ -242,7 +250,8 @@ func (s *Service) Lock(msg dbus.Message, objects []dbus.ObjectPath) ([]dbus.Obje
 	if err := call.Store(&locked, &prompt); err != nil {
 		return nil, "/", &dbus.Error{Name: "org.freedesktop.DBus.Error.Failed", Body: []any{err.Error()}}
 	}
-
+	// Lock can also return a backend prompt path; keep the same prompt ownership
+	// mapping used by Unlock/CreateCollection before exposing it on the front bus.
 	s.prompts.register(prompt, sender)
 	return locked, prompt, nil
 }
@@ -280,6 +289,8 @@ func (s *Service) SetAlias(msg dbus.Message, name string, collection dbus.Object
 	defer release()
 	senderInfo := s.resolver.Resolve(sender)
 	items := []approval.ItemInfo{aliasWriteInfo(name, collection)}
+	// Changing an alias affects which collection apps resolve later, so gate it as
+	// a backend write even though no individual secret item is modified here.
 	if _, err := s.approval.RequireApproval(reqCtx, s.clientName, items, "", approval.RequestTypeWrite, nil, senderInfo); err != nil {
 		return dbustypes.ErrAccessDenied(err.Error())
 	}
@@ -304,6 +315,8 @@ func (s *Service) CreateCollection(msg dbus.Message, properties map[string]dbus.
 	defer release()
 	senderInfo := s.resolver.Resolve(sender)
 	items := []approval.ItemInfo{createCollectionInfo(properties, alias)}
+	// Collection creation mutates backend state and may create a backend prompt, so
+	// use the write approval path before forwarding the request.
 	if _, err := s.approval.RequireApproval(reqCtx, s.clientName, items, "", approval.RequestTypeWrite, nil, senderInfo); err != nil {
 		return "/", "/", dbustypes.ErrAccessDenied(err.Error())
 	}
@@ -323,11 +336,14 @@ func (s *Service) CreateCollection(msg dbus.Message, properties map[string]dbus.
 	if err := call.Store(&collection, &prompt); err != nil {
 		return "/", "/", &dbus.Error{Name: "org.freedesktop.DBus.Error.Failed", Body: []any{err.Error()}}
 	}
-
+	// If the backend returns a prompt, bind it to this caller before the client
+	// drives the forwarded Prompt/Dismiss interaction.
 	s.prompts.register(prompt, sender)
 	return collection, prompt, nil
 }
 
+// Service-level writes do not target an existing item, so synthesize enough
+// ItemInfo for approval prompts, rules, and history to describe the operation.
 func createCollectionInfo(properties map[string]dbus.Variant, alias string) approval.ItemInfo {
 	info := approval.ItemInfo{Path: string(dbustypes.ServicePath)}
 	if alias != "" {

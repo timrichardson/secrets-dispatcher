@@ -31,7 +31,7 @@ var defaultIgnoreChromeDummySecret = true
 
 // BusConfig describes a D-Bus endpoint (upstream backend or downstream front).
 type BusConfig struct {
-	Type string `yaml:"type"`           // "session_bus", "socket", or downstream-only "sockets"
+	Type string `yaml:"type"`           // "session_bus", "socket", "sockets", or upstream-only "managed"
 	Path string `yaml:"path,omitempty"` // required for "socket" and "sockets" types
 }
 
@@ -47,6 +47,9 @@ func (cfg *Config) WithDefaults() *Config {
 		out.Listen = DefaultListenAddr
 	}
 	s := &out.Serve
+	if s.Upstream.Type != "managed" {
+		s.BackendCommand = ""
+	}
 	if s.LogLevel == "" {
 		s.LogLevel = DefaultLogLevel
 	}
@@ -98,9 +101,9 @@ func (cfg *Config) Validate() error {
 	s := &cfg.Serve
 
 	switch s.Upstream.Type {
-	case "session_bus", "socket":
+	case "session_bus", "socket", "managed":
 	default:
-		return fmt.Errorf("upstream type must be \"session_bus\" or \"socket\", got %q", s.Upstream.Type)
+		return fmt.Errorf("upstream type must be \"session_bus\", \"socket\", or \"managed\", got %q", s.Upstream.Type)
 	}
 	if s.Upstream.Type == "socket" && s.Upstream.Path == "" {
 		return fmt.Errorf("upstream type \"socket\" requires a non-empty path")
@@ -109,6 +112,9 @@ func (cfg *Config) Validate() error {
 		if s.SecureBackend.Provider != "gnome-keyring" {
 			return fmt.Errorf("secure_backend.provider must be \"gnome-keyring\", got %q", s.SecureBackend.Provider)
 		}
+	}
+	if s.Upstream.Type == "managed" && s.BackendCommand == "" {
+		return fmt.Errorf("upstream type \"managed\" requires serve.backend_command")
 	}
 
 	hasSessionBusDown := false
@@ -250,6 +256,7 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 // ServeConfig holds serve-subcommand settings.
 type ServeConfig struct {
 	Upstream                BusConfig            `yaml:"upstream"`
+	BackendCommand          string               `yaml:"backend_command,omitempty"`
 	Downstream              []BusConfig          `yaml:"downstream"`
 	LogLevel                string               `yaml:"log_level"`
 	LogFormat               string               `yaml:"log_format"`

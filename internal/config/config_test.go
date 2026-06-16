@@ -45,6 +45,9 @@ serve:
 	if cfg.Serve.Upstream.Path != "/run/upstream.sock" {
 		t.Errorf("Upstream.Path = %q, want /run/upstream.sock", cfg.Serve.Upstream.Path)
 	}
+	if cfg.Serve.BackendCommand != "" {
+		t.Errorf("BackendCommand = %q, want empty", cfg.Serve.BackendCommand)
+	}
 	if len(cfg.Serve.Downstream) != 1 {
 		t.Fatalf("Downstream len = %d, want 1", len(cfg.Serve.Downstream))
 	}
@@ -217,6 +220,18 @@ func TestWithDefaults(t *testing.T) {
 	}
 }
 
+func TestWithDefaultsPreservesManagedBackendCommand(t *testing.T) {
+	cfg := &Config{Serve: ServeConfig{
+		Upstream:       BusConfig{Type: "managed"},
+		BackendCommand: "/usr/bin/gopass-secret-service",
+		Downstream:     []BusConfig{{Type: "session_bus"}},
+	}}
+	out := cfg.WithDefaults()
+	if out.Serve.BackendCommand != "/usr/bin/gopass-secret-service" {
+		t.Errorf("BackendCommand = %q, want preserved", out.Serve.BackendCommand)
+	}
+}
+
 func TestValidate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -235,6 +250,14 @@ func TestValidate(t *testing.T) {
 			cfg: Config{Serve: ServeConfig{
 				Upstream:   BusConfig{Type: "socket", Path: "/run/up.sock"},
 				Downstream: []BusConfig{{Type: "session_bus"}},
+			}},
+		},
+		{
+			name: "valid managed upstream + session_bus downstream",
+			cfg: Config{Serve: ServeConfig{
+				Upstream:       BusConfig{Type: "managed"},
+				BackendCommand: "/usr/bin/gopass-secret-service",
+				Downstream:     []BusConfig{{Type: "session_bus"}},
 			}},
 		},
 		{
@@ -261,6 +284,14 @@ func TestValidate(t *testing.T) {
 				SecureBackend: &SecureBackendConfig{Provider: "other"},
 			}},
 			wantErr: "secure_backend.provider must be",
+		},
+		{
+			name: "managed upstream missing backend command",
+			cfg: Config{Serve: ServeConfig{
+				Upstream:   BusConfig{Type: "managed"},
+				Downstream: []BusConfig{{Type: "session_bus"}},
+			}},
+			wantErr: "requires serve.backend_command",
 		},
 		{
 			name: "sockets downstream missing path",

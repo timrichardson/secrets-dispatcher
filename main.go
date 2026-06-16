@@ -23,6 +23,7 @@ import (
 	"github.com/nikicat/secrets-dispatcher/internal/config"
 	"github.com/nikicat/secrets-dispatcher/internal/daemon"
 	"github.com/nikicat/secrets-dispatcher/internal/gpgsign"
+	"github.com/nikicat/secrets-dispatcher/internal/localbackend"
 	"github.com/nikicat/secrets-dispatcher/internal/notification"
 	"github.com/nikicat/secrets-dispatcher/internal/proxy"
 	"github.com/nikicat/secrets-dispatcher/internal/securelocal"
@@ -463,7 +464,25 @@ func runServe(args []string) {
 
 	// Resolve upstream address
 	var upstreamAddr string
-	if cfg.Serve.Upstream.Type == "socket" {
+	var managedBackend *localbackend.Supervisor
+	if cfg.Serve.Upstream.Type == "managed" {
+		runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+		if runtimeDir == "" {
+			fmt.Fprintln(os.Stderr, "error: XDG_RUNTIME_DIR must be set for managed local backend")
+			os.Exit(1)
+		}
+		managedBackend, err = localbackend.Start(ctx, localbackend.Options{
+			BackendCommand: cfg.Serve.BackendCommand,
+			RuntimeDir:     runtimeDir,
+			Log:            slog.Default(),
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error starting managed local backend: %v\n", err)
+			os.Exit(1)
+		}
+		defer managedBackend.Stop()
+		upstreamAddr = managedBackend.Address()
+	} else if cfg.Serve.Upstream.Type == "socket" {
 		upstreamAddr = "unix:path=" + cfg.Serve.Upstream.Path
 	}
 
@@ -472,6 +491,9 @@ func runServe(args []string) {
 	type downstreamRunner func(context.Context) error
 
 	var runners []downstreamRunner
+	if managedBackend != nil {
+		runners = append(runners, managedBackend.Wait)
+	}
 
 	for _, ds := range cfg.Serve.Downstream {
 		switch ds.Type {
@@ -925,7 +947,7 @@ func runServiceInstall(args []string) {
 	start := fs.Bool("start", false, "Start the service immediately after installing")
 	configPath := fs.String("config", "", "Config file path (default: $XDG_CONFIG_HOME/secrets-dispatcher/config.yaml)")
 	mode := fs.String("mode", "remote", "Topology mode: remote, local, full, or secure-local")
-	backend := fs.String("backend", "", "Backend command or preset for local/full modes; provider for secure-local (default/preset: gnome-keyring)")
+	backend := fs.String("backend", "", "Backend command or preset for local/full modes; provider for secure-local (local/full default: gopass-secret-service; preset/provider: gnome-keyring)")
 	fs.Parse(args)
 
 	if err := service.Install(service.Options{
@@ -951,7 +973,7 @@ Install options:
   --start       Start the service immediately after installing
   --config      Config file path (default: $XDG_CONFIG_HOME/secrets-dispatcher/config.yaml)
   --mode        Topology mode: remote, local, full, or secure-local (default: remote)
-  --backend     Backend command or preset for local/full; provider for secure-local (default/preset: gnome-keyring)
+  --backend     Backend command or preset for local/full; provider for secure-local (local/full default: gopass-secret-service; preset/provider: gnome-keyring)
 `, progName)
 }
 

@@ -26,10 +26,12 @@ var secureSystemUnitPaths = []string{
 
 // allUnitNames lists every unit file the package may install.
 var allUnitNames = []string{
+	unitFileName,
+	// Legacy local/full topology units. New installs no longer create these
+	// because the backend bus is supervised privately inside secrets-dispatcher.
 	"secrets-dispatcher-bus.socket",
 	"secrets-dispatcher-bus.service",
 	"secrets-dispatcher-backend.service",
-	unitFileName,
 }
 
 const unitTemplate = `[Unit]
@@ -46,41 +48,9 @@ RestartSec=5
 WantedBy=graphical-session.target
 `
 
-const busSocketTemplate = `[Unit]
-Description=Secrets Dispatcher - Private D-Bus for backend
-
-[Socket]
-ListenStream=%t/secrets-dispatcher/backend-bus.sock
-DirectoryMode=0700
-
-[Install]
-WantedBy=sockets.target
-`
-
-const busServiceTemplate = `[Unit]
-Description=Secrets Dispatcher - Private D-Bus daemon
-
-[Service]
-Type=simple
-ExecStart=%s --session --nofork --nopidfile --address=systemd:
-`
-
-const backendServiceTemplate = `[Unit]
-Description=Secrets Dispatcher - Secret Service backend
-Requires=secrets-dispatcher-bus.socket
-After=secrets-dispatcher-bus.socket
-
-[Service]
-Type=simple
-ExecStart=%s
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%%t/secrets-dispatcher/backend-bus.sock
-`
-
 const localProxyTemplate = `[Unit]
 Description=Secrets Dispatcher - D-Bus Secret Service approval proxy
 Documentation=https://github.com/nikicat/secrets-dispatcher
-Requires=secrets-dispatcher-backend.service
-After=secrets-dispatcher-backend.service
 
 [Service]
 Type=simple
@@ -228,17 +198,11 @@ func Install(opts Options) error {
 		}
 	}
 
-	// Update only the topology fields in the config, preserving everything else.
-	if err := updateTopologyConfig(configPath, runtimeDir, mode); err != nil {
-		return err
-	}
-	fmt.Printf("Wrote config: %s\n", configPath)
-
-	var dbusDaemon, backendCommand string
+	var backendCommand string
 	usesGnomeKeyringBackend := false
 	if mode == "local" || mode == "full" {
 		var lpErr error
-		dbusDaemon, lpErr = lookPathFunc("dbus-daemon")
+		_, lpErr = lookPathFunc("dbus-daemon")
 		if lpErr != nil {
 			return fmt.Errorf("find dbus-daemon: %w", lpErr)
 		}
@@ -248,6 +212,12 @@ func Install(opts Options) error {
 		}
 		usesGnomeKeyringBackend = isGnomeKeyringBackend(opts.BackendPath, backendCommand)
 	}
+
+	// Update only the topology fields in the config, preserving everything else.
+	if err := updateTopologyConfig(configPath, runtimeDir, mode, backendCommand); err != nil {
+		return err
+	}
+	fmt.Printf("Wrote config: %s\n", configPath)
 
 	// Mask/unmask D-Bus activation based on mode.
 	switch mode {
@@ -284,9 +254,6 @@ func Install(opts Options) error {
 	case "remote":
 		needed[unitFileName] = fmt.Sprintf(unitTemplate, execStart)
 	case "local", "full":
-		needed["secrets-dispatcher-bus.socket"] = busSocketTemplate
-		needed["secrets-dispatcher-bus.service"] = fmt.Sprintf(busServiceTemplate, dbusDaemon)
-		needed["secrets-dispatcher-backend.service"] = fmt.Sprintf(backendServiceTemplate, backendCommand)
 		needed[unitFileName] = fmt.Sprintf(localProxyTemplate, execStart)
 	case "secure-local":
 		// Root provisioning installs and owns secrets-dispatcher-secure@.service.
@@ -326,12 +293,6 @@ func Install(opts Options) error {
 	if err := systemctlFunc("daemon-reload"); err != nil {
 		return err
 	}
-	if mode == "local" || mode == "full" {
-		if err := systemctlFunc("enable", "secrets-dispatcher-bus.socket"); err != nil {
-			return err
-		}
-		fmt.Println("Enabled secrets-dispatcher-bus.socket")
-	}
 	if mode != "secure-local" {
 		if err := systemctlFunc("enable", unitFileName); err != nil {
 			return err
@@ -354,12 +315,6 @@ func Install(opts Options) error {
 			fmt.Printf("Enabled and started %s\n", unit)
 			return nil
 		}
-		if mode == "local" || mode == "full" {
-			if err := systemctlFunc("start", "secrets-dispatcher-bus.socket"); err != nil {
-				return err
-			}
-			fmt.Println("Started secrets-dispatcher-bus.socket")
-		}
 		if err := systemctlFunc("start", unitFileName); err != nil {
 			return err
 		}
@@ -371,28 +326,30 @@ func Install(opts Options) error {
 
 // updateTopologyConfig loads the config, sets upstream/downstream for the given mode,
 // and writes it back. All other fields are preserved.
-func updateTopologyConfig(configPath, runtimeDir, mode string) error {
+func updateTopologyConfig(configPath, runtimeDir, mode, backendCommand string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	busSocket := filepath.Join(runtimeDir, "secrets-dispatcher", "backend-bus.sock")
 	socketsDir := filepath.Join(runtimeDir, "secrets-dispatcher", "sockets")
 
 	switch mode {
 	case "remote":
 		cfg.Serve.Upstream = config.BusConfig{Type: "session_bus"}
+		cfg.Serve.BackendCommand = ""
 		cfg.Serve.Downstream = []config.BusConfig{
 			{Type: "sockets", Path: socketsDir},
 		}
 	case "local":
-		cfg.Serve.Upstream = config.BusConfig{Type: "socket", Path: busSocket}
+		cfg.Serve.Upstream = config.BusConfig{Type: "managed"}
+		cfg.Serve.BackendCommand = backendCommand
 		cfg.Serve.Downstream = []config.BusConfig{
 			{Type: "session_bus"},
 		}
 	case "full":
-		cfg.Serve.Upstream = config.BusConfig{Type: "socket", Path: busSocket}
+		cfg.Serve.Upstream = config.BusConfig{Type: "managed"}
+		cfg.Serve.BackendCommand = backendCommand
 		cfg.Serve.Downstream = []config.BusConfig{
 			{Type: "session_bus"},
 			{Type: "sockets", Path: socketsDir},
@@ -400,6 +357,7 @@ func updateTopologyConfig(configPath, runtimeDir, mode string) error {
 		cfg.Serve.SecureBackend = nil
 	case "secure-local":
 		cfg.Serve.Upstream = config.BusConfig{Type: "session_bus"}
+		cfg.Serve.BackendCommand = ""
 		cfg.Serve.Downstream = []config.BusConfig{{Type: "sockets", Path: socketsDir}}
 		cfg.Serve.SecureBackend = &config.SecureBackendConfig{Provider: "gnome-keyring"}
 	}
@@ -527,19 +485,43 @@ func resolveBackendCommand(backend string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("find gopass-secret-service: %w", err)
 		}
-		return systemdExecStart(path)
+		return commandLine(path)
 	case "gnome-keyring", "gnome-keyring-daemon":
 		path, err := lookPathFunc("gnome-keyring-daemon")
 		if err != nil {
 			return "", fmt.Errorf("find gnome-keyring-daemon: %w", err)
 		}
-		return systemdExecStartAllowSpecifiers(path, "--foreground", "--components=secrets", "--control-directory=%t/keyring-dispatcher-backend")
+		return commandLine(path, "--foreground", "--components=secrets", "--control-directory=%B")
 	default:
 		if err := validateUnitLine("backend command", backend); err != nil {
 			return "", err
 		}
 		return backend, nil
 	}
+}
+
+func commandLine(args ...string) (string, error) {
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		q, err := quoteCommandArg(arg)
+		if err != nil {
+			return "", err
+		}
+		quoted = append(quoted, q)
+	}
+	return strings.Join(quoted, " "), nil
+}
+
+func quoteCommandArg(arg string) (string, error) {
+	if err := validateUnitLine("backend command argument", arg); err != nil {
+		return "", err
+	}
+	if arg != "" && !strings.ContainsAny(arg, " \t\\\"") {
+		return arg, nil
+	}
+	arg = strings.ReplaceAll(arg, `\`, `\\`)
+	arg = strings.ReplaceAll(arg, `"`, `\"`)
+	return `"` + arg + `"`, nil
 }
 
 func isGnomeKeyringBackend(original, resolved string) bool {
@@ -585,10 +567,6 @@ func firstCommandWord(command string) string {
 
 func systemdExecStart(args ...string) (string, error) {
 	return systemdExecStartWithSpecifiers(false, args...)
-}
-
-func systemdExecStartAllowSpecifiers(args ...string) (string, error) {
-	return systemdExecStartWithSpecifiers(true, args...)
 }
 
 func systemdExecStartWithSpecifiers(allowSpecifiers bool, args ...string) (string, error) {

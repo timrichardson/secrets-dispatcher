@@ -80,6 +80,20 @@ func defaultLookPath(name string) (string, error) {
 	return "/usr/bin/" + name, nil
 }
 
+func readTestConfig(t *testing.T, configHome string) config.Config {
+	t.Helper()
+	configPath := filepath.Join(configHome, "secrets-dispatcher", "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg config.Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	return cfg
+}
+
 // --- remote mode (default) ---
 
 func TestInstallRemoteWritesProxyUnit(t *testing.T) {
@@ -237,7 +251,7 @@ func TestInstallCustomConfigPath(t *testing.T) {
 
 // --- local mode ---
 
-func TestInstallLocalWritesAllUnits(t *testing.T) {
+func TestInstallLocalWritesProxyUnitOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	t.Setenv("XDG_DATA_HOME", tmpDir)
@@ -252,49 +266,19 @@ func TestInstallLocalWritesAllUnits(t *testing.T) {
 	}
 
 	dir := filepath.Join(tmpDir, "systemd", "user")
-	for _, name := range allUnitNames {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			t.Errorf("unit file %s not found: %v", name, err)
+	for _, name := range []string{"secrets-dispatcher-bus.socket", "secrets-dispatcher-bus.service", "secrets-dispatcher-backend.service"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("local mode must not create exposed backend unit %s", name)
 		}
 	}
 
-	// Socket unit.
-	content, _ := os.ReadFile(filepath.Join(dir, "secrets-dispatcher-bus.socket"))
+	content, _ := os.ReadFile(filepath.Join(dir, unitFileName))
 	s := string(content)
-	if !strings.Contains(s, "ListenStream=%t/secrets-dispatcher/backend-bus.sock") {
-		t.Errorf("socket unit wrong ListenStream, got:\n%s", s)
-	}
-	if !strings.Contains(s, "WantedBy=sockets.target") {
-		t.Error("socket unit missing WantedBy=sockets.target")
-	}
-
-	// Bus service.
-	content, _ = os.ReadFile(filepath.Join(dir, "secrets-dispatcher-bus.service"))
-	if !strings.Contains(string(content), "/usr/bin/dbus-daemon --session --nofork --nopidfile --address=systemd:") {
-		t.Error("bus service wrong ExecStart")
-	}
-
-	// Backend service.
-	content, _ = os.ReadFile(filepath.Join(dir, "secrets-dispatcher-backend.service"))
-	s = string(content)
-	if !strings.Contains(s, "ExecStart=/usr/bin/gopass-secret-service") {
-		t.Error("backend service wrong ExecStart")
-	}
-	if !strings.Contains(s, "DBUS_SESSION_BUS_ADDRESS=unix:path=%t/secrets-dispatcher/backend-bus.sock") {
-		t.Error("backend service missing DBUS_SESSION_BUS_ADDRESS")
-	}
-	if !strings.Contains(s, "Requires=secrets-dispatcher-bus.socket") {
-		t.Error("backend service missing Requires")
-	}
-
-	// Proxy service (local variant).
-	content, _ = os.ReadFile(filepath.Join(dir, unitFileName))
-	s = string(content)
 	if !strings.Contains(s, "serve --config") {
 		t.Error("proxy service missing 'serve --config'")
 	}
-	if !strings.Contains(s, "Requires=secrets-dispatcher-backend.service") {
-		t.Error("proxy service missing Requires=backend")
+	if strings.Contains(s, "backend-bus.sock") || strings.Contains(s, "secrets-dispatcher-backend.service") {
+		t.Errorf("proxy unit should not expose or require backend bus, got:\n%s", s)
 	}
 }
 
@@ -323,12 +307,14 @@ func TestInstallLocalConfig(t *testing.T) {
 		t.Fatalf("unmarshal config: %v", err)
 	}
 
-	if cfg.Serve.Upstream.Type != "socket" {
-		t.Errorf("upstream type = %q, want socket", cfg.Serve.Upstream.Type)
+	if cfg.Serve.Upstream.Type != "managed" {
+		t.Errorf("upstream type = %q, want managed", cfg.Serve.Upstream.Type)
 	}
-	wantPath := "/run/user/1000/secrets-dispatcher/backend-bus.sock"
-	if cfg.Serve.Upstream.Path != wantPath {
-		t.Errorf("upstream path = %q, want %q", cfg.Serve.Upstream.Path, wantPath)
+	if cfg.Serve.Upstream.Path != "" {
+		t.Errorf("managed upstream path = %q, want empty", cfg.Serve.Upstream.Path)
+	}
+	if cfg.Serve.BackendCommand != "/usr/bin/gopass-secret-service" {
+		t.Errorf("backend_command = %q, want /usr/bin/gopass-secret-service", cfg.Serve.BackendCommand)
 	}
 	if len(cfg.Serve.Downstream) != 1 || cfg.Serve.Downstream[0].Type != "session_bus" {
 		t.Errorf("downstream = %+v, want [{session_bus}]", cfg.Serve.Downstream)
@@ -351,7 +337,6 @@ func TestInstallLocalSystemctlCalls(t *testing.T) {
 
 	expected := []string{
 		"daemon-reload",
-		"enable secrets-dispatcher-bus.socket",
 		"enable " + unitFileName,
 	}
 	if len(*calls) != len(expected) {
@@ -380,9 +365,7 @@ func TestInstallLocalWithStart(t *testing.T) {
 
 	expected := []string{
 		"daemon-reload",
-		"enable secrets-dispatcher-bus.socket",
 		"enable " + unitFileName,
-		"start secrets-dispatcher-bus.socket",
 		"start " + unitFileName,
 	}
 	if len(*calls) != len(expected) {
@@ -422,8 +405,11 @@ func TestInstallFullConfig(t *testing.T) {
 		t.Fatalf("unmarshal config: %v", err)
 	}
 
-	if cfg.Serve.Upstream.Type != "socket" {
-		t.Errorf("upstream type = %q, want socket", cfg.Serve.Upstream.Type)
+	if cfg.Serve.Upstream.Type != "managed" {
+		t.Errorf("upstream type = %q, want managed", cfg.Serve.Upstream.Type)
+	}
+	if cfg.Serve.BackendCommand != "/usr/bin/gopass-secret-service" {
+		t.Errorf("backend_command = %q, want /usr/bin/gopass-secret-service", cfg.Serve.BackendCommand)
 	}
 	if len(cfg.Serve.Downstream) != 2 {
 		t.Fatalf("downstream count = %d, want 2", len(cfg.Serve.Downstream))
@@ -440,7 +426,7 @@ func TestInstallFullConfig(t *testing.T) {
 	}
 }
 
-func TestInstallFullWritesAllUnits(t *testing.T) {
+func TestInstallFullWritesProxyUnitOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	t.Setenv("XDG_DATA_HOME", tmpDir)
@@ -455,9 +441,12 @@ func TestInstallFullWritesAllUnits(t *testing.T) {
 	}
 
 	dir := filepath.Join(tmpDir, "systemd", "user")
-	for _, name := range allUnitNames {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			t.Errorf("unit file %s not found: %v", name, err)
+	if _, err := os.Stat(filepath.Join(dir, unitFileName)); err != nil {
+		t.Errorf("unit file %s not found: %v", unitFileName, err)
+	}
+	for _, name := range []string{"secrets-dispatcher-bus.socket", "secrets-dispatcher-bus.service", "secrets-dispatcher-backend.service"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("full mode must not create exposed backend unit %s", name)
 		}
 	}
 }
@@ -639,8 +628,11 @@ func TestInstallPreservesExistingConfig(t *testing.T) {
 	yaml.Unmarshal(data, &cfg)
 
 	// Topology should be updated.
-	if cfg.Serve.Upstream.Type != "socket" {
-		t.Errorf("upstream should be socket, got %q", cfg.Serve.Upstream.Type)
+	if cfg.Serve.Upstream.Type != "managed" {
+		t.Errorf("upstream should be managed, got %q", cfg.Serve.Upstream.Type)
+	}
+	if cfg.Serve.BackendCommand != "/usr/bin/gopass-secret-service" {
+		t.Errorf("backend_command = %q, want /usr/bin/gopass-secret-service", cfg.Serve.BackendCommand)
 	}
 
 	// Other settings should be preserved.
@@ -724,10 +716,9 @@ func TestInstallLocalAutoDetectsBackend(t *testing.T) {
 		t.Fatalf("Install() error: %v", err)
 	}
 
-	dir := filepath.Join(tmpDir, "systemd", "user")
-	content, _ := os.ReadFile(filepath.Join(dir, "secrets-dispatcher-backend.service"))
-	if !strings.Contains(string(content), "ExecStart=/opt/bin/gopass-secret-service") {
-		t.Error("should use auto-detected backend path")
+	cfg := readTestConfig(t, tmpDir)
+	if cfg.Serve.BackendCommand != "/opt/bin/gopass-secret-service" {
+		t.Errorf("backend_command = %q, want auto-detected backend path", cfg.Serve.BackendCommand)
 	}
 }
 
@@ -745,10 +736,9 @@ func TestInstallLocalExplicitBackendPath(t *testing.T) {
 		t.Fatalf("Install() error: %v", err)
 	}
 
-	dir := filepath.Join(tmpDir, "systemd", "user")
-	content, _ := os.ReadFile(filepath.Join(dir, "secrets-dispatcher-backend.service"))
-	if !strings.Contains(string(content), "ExecStart=/custom/backend") {
-		t.Error("should use explicit backend path")
+	cfg := readTestConfig(t, tmpDir)
+	if cfg.Serve.BackendCommand != "/custom/backend" {
+		t.Errorf("backend_command = %q, want explicit backend path", cfg.Serve.BackendCommand)
 	}
 }
 
@@ -784,11 +774,10 @@ func TestInstallLocalGnomeKeyringBackendPreset(t *testing.T) {
 		t.Fatalf("Install() error: %v", err)
 	}
 
-	dir := filepath.Join(tmpDir, "systemd", "user")
-	content, _ := os.ReadFile(filepath.Join(dir, "secrets-dispatcher-backend.service"))
-	s := string(content)
-	if !strings.Contains(s, "ExecStart=/usr/bin/gnome-keyring-daemon --foreground --components=secrets --control-directory=%t/keyring-dispatcher-backend") {
-		t.Errorf("should use GNOME Keyring backend preset, got:\n%s", s)
+	cfg := readTestConfig(t, tmpDir)
+	wantCommand := "/usr/bin/gnome-keyring-daemon --foreground --components=secrets --control-directory=%B"
+	if cfg.Serve.BackendCommand != wantCommand {
+		t.Errorf("backend_command = %q, want %q", cfg.Serve.BackendCommand, wantCommand)
 	}
 
 	callStr := strings.Join(*calls, "\n")

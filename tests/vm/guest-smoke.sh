@@ -47,7 +47,7 @@ desktop_uid() {
 run_as_desktop() {
 	local uid home
 	uid=$(desktop_uid)
-	home=/home/$DESKTOP_USER
+	home="/home/$DESKTOP_USER"
 	(
 		cd "$home"
 		runuser -u "$DESKTOP_USER" -- env -i \
@@ -101,6 +101,14 @@ secret_service_has_owner() {
 		s org.freedesktop.secrets 2>/dev/null | grep -q 'b true'
 }
 
+secret_service_owner_pid() {
+	local out
+	out=$(run_as_desktop busctl --user --timeout=5 call \
+		org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixProcessID \
+		s org.freedesktop.secrets)
+	printf '%s\n' "$out" | awk '{ print $2 }'
+}
+
 wait_for_secret_service_owner() {
 	for _ in $(seq 1 60); do
 		if secret_service_has_owner; then
@@ -115,6 +123,21 @@ wait_for_secret_service_owner() {
 	return 1
 }
 
+assert_secret_service_owned_by_dispatcher() {
+	local pid owner_exe expected_exe
+	pid=$(secret_service_owner_pid)
+	if ! [ "$pid" -gt 0 ] 2>/dev/null; then
+		log "could not determine org.freedesktop.secrets owner PID: $pid"
+		return 1
+	fi
+	owner_exe=$(readlink -f "/proc/$pid/exe")
+	expected_exe=$(readlink -f "$BINARY")
+	if [ "$owner_exe" != "$expected_exe" ]; then
+		log "unexpected org.freedesktop.secrets owner: pid=$pid exe=$owner_exe expected=$expected_exe"
+		return 1
+	fi
+}
+
 assert_tcp_api_requires_auth() {
 	local code
 	code=$(run_as_desktop curl -sS -o /tmp/secrets-dispatcher-status.json -w '%{http_code}' http://127.0.0.1:8484/api/v1/status || true)
@@ -123,6 +146,42 @@ assert_tcp_api_requires_auth() {
 		cat /tmp/secrets-dispatcher-status.json 2>/dev/null || true
 		return 1
 	fi
+}
+
+assert_normal_local_topology() {
+	local cfg unit_dir unit
+	cfg="/home/$DESKTOP_USER/.config/secrets-dispatcher/config.yaml"
+	unit_dir="/home/$DESKTOP_USER/.config/systemd/user"
+	if [ ! -f "$cfg" ]; then
+		log "config not found: $cfg"
+		return 1
+	fi
+	if ! grep -q 'type: managed' "$cfg"; then
+		log "local mode config does not use managed upstream"
+		cat "$cfg" || true
+		return 1
+	fi
+	if ! grep -q 'backend_command: .*gnome-keyring-daemon' "$cfg"; then
+		log "local mode config does not use GNOME Keyring backend command"
+		cat "$cfg" || true
+		return 1
+	fi
+	if ! grep -q 'type: session_bus' "$cfg"; then
+		log "local mode config does not expose the session bus downstream"
+		cat "$cfg" || true
+		return 1
+	fi
+	if grep -Eq 'keyring-dispatcher-backend|secrets-dispatcher-bus|backend_bus' "$cfg"; then
+		log "local mode config contains stale public backend details"
+		cat "$cfg" || true
+		return 1
+	fi
+	for unit in secrets-dispatcher-bus.socket secrets-dispatcher-bus.service secrets-dispatcher-backend.service; do
+		if [ -e "$unit_dir/$unit" ]; then
+			log "stale split-backend unit exists: $unit_dir/$unit"
+			return 1
+		fi
+	done
 }
 
 wait_for_unix_socket() {
@@ -150,10 +209,12 @@ assert_secure_api_requires_auth() {
 }
 
 install_normal_local_mode() {
-	log "installing normal local mode"
+	log "installing normal local mode with managed GNOME Keyring backend"
 	run_as_desktop "$BINARY" service install --mode local --backend gnome-keyring --start
 	wait_for_user_unit secrets-dispatcher.service
 	wait_for_secret_service_owner
+	assert_secret_service_owned_by_dispatcher
+	assert_normal_local_topology
 	assert_tcp_api_requires_auth
 	log "normal local mode installed successfully"
 }
@@ -228,6 +289,7 @@ install_secure_local_mode() {
 	done
 	systemctl is-active --quiet "$unit" || fail_with_unit_logs "$unit"
 	wait_for_secret_service_owner || fail_with_unit_logs "$unit"
+	assert_secret_service_owned_by_dispatcher
 	assert_secure_api_requires_auth
 	log "secure-local mode installed successfully"
 }

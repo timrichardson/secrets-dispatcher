@@ -4,9 +4,10 @@ This harness boots a disposable Ubuntu cloud VM with libvirt/QEMU, copies the
 locally built `secrets-dispatcher` binary into the guest, and exercises service
 installation against a real systemd user manager and D-Bus session bus.
 
-The secure-local scenario checks both paths this branch must preserve:
+The smoke tests cover:
 
-- normal user-mode local install with GNOME Keyring
+- normal user-mode local install with a dispatcher-supervised private GNOME
+  Keyring backend
 - secure-local provisioning and root-managed secure service startup
 
 ## Host Dependencies
@@ -63,14 +64,24 @@ Useful environment variables:
 - `VM_INSTALL_HOST_DEPS`: `1` tries to install missing host commands with
   `apt-get` or `dnf`; `0` only reports missing dependencies. Defaults to `1`.
 
+## Normal Local Scope
+
+The normal scenario performs these checks inside the VM:
+
+- Installs local mode with `service install --mode local --backend gnome-keyring --start`.
+- Verifies `secrets-dispatcher.service` is active.
+- Verifies `org.freedesktop.secrets` is owned by the `secrets-dispatcher` binary
+  on the desktop user's session bus.
+- Verifies the generated config uses `serve.upstream.type: managed` with a GNOME
+  Keyring backend command.
+- Verifies stale split-backend user units are not installed.
+- Verifies the normal HTTP API endpoint is reachable and requires auth.
+
 ## Secure-Local Scope
 
-The secure-local scenario performs these checks inside the VM:
+The secure-local scenario first runs the normal local checks, then performs these
+additional checks inside the VM:
 
-- Installs normal local mode with `service install --mode local --backend gnome-keyring --start`.
-- Verifies `secrets-dispatcher.service` is active.
-- Verifies `org.freedesktop.secrets` is owned on the desktop user's session bus.
-- Verifies the normal HTTP API endpoint is reachable and requires auth.
 - Uninstalls the normal user-mode service.
 - Runs `provision --mode secure-local --user <user> --binary /usr/local/bin/secrets-dispatcher`.
 - Writes the root-owned trusted config used by `secure-launch` at
@@ -79,7 +90,8 @@ The secure-local scenario performs these checks inside the VM:
 - Verifies the backend user, backend home permissions, and root systemd unit.
 - Runs `service install --mode secure-local` as the desktop user.
 - Starts `secrets-dispatcher-secure@<user>.service` as root.
-- Verifies `org.freedesktop.secrets` is owned on the desktop user's session bus.
+- Verifies `org.freedesktop.secrets` is owned by the `secrets-dispatcher` binary
+  on the desktop user's session bus.
 - Verifies the secure Unix-socket API endpoint is reachable and requires auth.
 
 This is a deployment smoke test. It does not attempt a full interactive approval
