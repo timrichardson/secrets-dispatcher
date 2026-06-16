@@ -51,6 +51,14 @@ func TestSavedApprovalRule_PersistsAndMatchesAfterReload(t *testing.T) {
 	if !autoApproved {
 		t.Fatal("expected saved rule to auto-approve")
 	}
+	history := reloaded.History()
+	if len(history) != 1 {
+		t.Fatalf("history count = %d, want 1", len(history))
+	}
+	info := history[0].Request.AutoApproval
+	if info == nil || info.Source != "saved_rule" || info.RuleName == "" || info.RuleID == "" {
+		t.Fatalf("auto approval attribution = %#v, want saved rule with name and ID", info)
+	}
 }
 
 func TestPersistAutoApproveRule_SavesAndRemovesTemporaryRule(t *testing.T) {

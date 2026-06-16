@@ -136,6 +136,24 @@
   function canSaveRule(entry: HistoryEntryType): boolean {
     return entry.resolution === "approved" || entry.resolution === "cancelled" || entry.resolution === "auto_approved";
   }
+
+  function sourceLabel(source: string): string {
+    switch (source) {
+      case "saved_rule": return "saved rule";
+      case "temporary_rule": return "temporary rule";
+      case "config_rule": return "config rule";
+      case "trusted_signer": return "trusted signer";
+      default: return source.replaceAll("_", " ");
+    }
+  }
+
+  function autoApprovalLabel(entry: HistoryEntryType): string {
+    const info = entry.request.auto_approval;
+    if (!info) return "";
+    const name = info.rule_name || info.rule_id || sourceLabel(info.source);
+    const suffix = info.rule_id && info.rule_name ? ` (${info.rule_id.slice(0, 8)})` : "";
+    return `${sourceLabel(info.source)}: ${name}${suffix}`;
+  }
 </script>
 
 <li class="history-entry">
@@ -171,6 +189,9 @@
     <ProcessChain chain={entry.request.sender_info?.process_chain ?? []} fallbackText={formatSenderInfo(entry)} />
   </div>
   <PropsTable {...historyEntryProps(entry.request)} />
+  {#if entry.request.auto_approval}
+    <div class="auto-approval-source">Auto-approved by {autoApprovalLabel(entry)}</div>
+  {/if}
   {#if entry.resolution === "cancelled"}
     <button
       class="btn-auto-approve"
@@ -319,6 +340,15 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .auto-approval-source {
+    font-size: 12px;
+    color: var(--color-primary);
+    background-color: rgba(59, 130, 246, 0.08);
+    border: 1px solid rgba(59, 130, 246, 0.18);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
   }
 
   .btn-auto-approve {

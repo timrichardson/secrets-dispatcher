@@ -100,6 +100,9 @@ type Request struct {
 	// SenderInfo contains information about the requesting process.
 	SenderInfo SenderInfo `json:"sender_info"`
 
+	// AutoApproval describes why an auto-approved request bypassed prompting.
+	AutoApproval *AutoApprovalInfo `json:"auto_approval,omitempty"`
+
 	// GPGSignInfo contains signing context for gpg_sign requests; nil for other types.
 	GPGSignInfo *GPGSignInfo `json:"gpg_sign_info,omitempty"`
 
@@ -116,6 +119,17 @@ type Request struct {
 	// Internal: channel signaled when request is approved/denied
 	done   chan struct{}
 	result bool // true = approved, false = denied
+}
+
+// AutoApprovalInfo describes the mechanism that auto-approved a request.
+type AutoApprovalInfo struct {
+	Source           string            `json:"source"`
+	RuleID           string            `json:"rule_id,omitempty"`
+	RuleName         string            `json:"rule_name,omitempty"`
+	RuleRequestTypes []string          `json:"rule_request_types,omitempty"`
+	Process          *ProcessMatcher   `json:"process,omitempty"`
+	Secret           *SecretMatcher    `json:"secret,omitempty"`
+	SearchAttributes map[string]string `json:"search_attributes,omitempty"`
 }
 
 // Resolution represents how a request was resolved.
@@ -351,7 +365,7 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 		return true, nil
 	}
 
-	newResolvedRequest := func() *Request {
+	newResolvedRequest := func(autoApproval *AutoApprovalInfo) *Request {
 		now := time.Now()
 		return &Request{
 			ID:               uuid.New().String(),
@@ -363,6 +377,7 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 			Type:             reqType,
 			SearchAttributes: searchAttrs,
 			SenderInfo:       senderInfo,
+			AutoApproval:     cloneAutoApprovalInfo(autoApproval),
 		}
 	}
 
@@ -373,10 +388,10 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 			"rule_name", rule.Name,
 			"action", action)
 		if action == "ignore" {
-			m.notify(Event{Type: EventRequestIgnored, Request: newResolvedRequest()})
+			m.notify(Event{Type: EventRequestIgnored, Request: newResolvedRequest(nil)})
 			return true, ErrIgnored
 		}
-		m.notify(Event{Type: EventRequestDenied, Request: newResolvedRequest()})
+		m.notify(Event{Type: EventRequestDenied, Request: newResolvedRequest(nil)})
 		return true, ErrDeniedByRule
 	}
 
@@ -394,17 +409,14 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 			"rule_id", rule.ID,
 			"invoker", rule.InvokerName,
 			"type", rule.RequestType)
-		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest()})
+		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(NewTemporaryRuleAutoApproval(rule))})
 		return true, nil
 	}
 
 	// Check user-managed saved approval rules.
 	if rule := m.checkSavedApprovalRules(senderInfo, items, reqType, searchAttrs); rule != nil {
-		slog.Info("saved approval rule matched",
-			"rule_id", rule.ID,
-			"rule_name", rule.Name,
-			"type", reqType)
-		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest()})
+		LogSavedApprovalRuleMatch(rule, senderInfo, items, reqType, searchAttrs, client)
+		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(NewSavedRuleAutoApproval(rule))})
 		return true, nil
 	}
 
@@ -414,7 +426,7 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 		slog.Info("trust rule matched",
 			"rule_name", rule.Name,
 			"action", action)
-		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest()})
+		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(autoApprovalFromTrustRule(rule))})
 		return true, nil
 	}
 

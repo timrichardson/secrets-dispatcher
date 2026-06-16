@@ -54,6 +54,32 @@ type ItemInfo struct {
 	Attributes map[string]string `json:"attributes"`
 }
 
+// ProcessMatcher describes process fields that matched an auto-approval rule.
+type ProcessMatcher struct {
+	Exe  string `json:"exe,omitempty"`
+	Name string `json:"name,omitempty"`
+	CWD  string `json:"cwd,omitempty"`
+	Unit string `json:"unit,omitempty"`
+}
+
+// SecretMatcher describes secret fields that matched an auto-approval rule.
+type SecretMatcher struct {
+	Collection string            `json:"collection,omitempty"`
+	Label      string            `json:"label,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+// AutoApprovalInfo describes why a request was auto-approved.
+type AutoApprovalInfo struct {
+	Source           string            `json:"source"`
+	RuleID           string            `json:"rule_id,omitempty"`
+	RuleName         string            `json:"rule_name,omitempty"`
+	RuleRequestTypes []string          `json:"rule_request_types,omitempty"`
+	Process          *ProcessMatcher   `json:"process,omitempty"`
+	Secret           *SecretMatcher    `json:"secret,omitempty"`
+	SearchAttributes map[string]string `json:"search_attributes,omitempty"`
+}
+
 // GPGSignInfo carries commit context for a gpg_sign approval request.
 // This is an intentional duplication of approval.GPGSignInfo — the cli package
 // deliberately does not import internal/approval or internal/api.
@@ -80,6 +106,7 @@ type PendingRequest struct {
 	SearchAttributes map[string]string `json:"search_attributes,omitempty"`
 	GPGSignInfo      *GPGSignInfo      `json:"gpg_sign_info,omitempty"`
 	SenderInfo       SenderInfo        `json:"sender_info"`
+	AutoApproval     *AutoApprovalInfo `json:"auto_approval,omitempty"`
 }
 
 // HistoryEntry represents a resolved approval request.

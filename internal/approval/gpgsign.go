@@ -31,23 +31,24 @@ type GPGSignInfo struct {
 // appears). Fires EventRequestAutoApproved so the history entry shows "auto_approved".
 // The request is never added to pending and no timeout goroutine is started.
 // sig and status are the gpg output to deliver to the thin client via WebSocket.
-func (m *Manager) RecordAutoApprovedGPGSign(client string, info *GPGSignInfo, senderInfo SenderInfo, sig, status []byte) (string, error) {
+func (m *Manager) RecordAutoApprovedGPGSign(client string, info *GPGSignInfo, senderInfo SenderInfo, sig, status []byte, autoApproval *AutoApprovalInfo) (string, error) {
 	if info == nil {
 		return "", errors.New("gpg sign info is required")
 	}
 
 	now := time.Now()
 	req := &Request{
-		ID:          uuid.New().String(),
-		Client:      client,
-		CreatedAt:   now,
-		ExpiresAt:   now,
-		Type:        RequestTypeGPGSign,
-		GPGSignInfo: info,
-		SenderInfo:  senderInfo,
-		Signature:   sig,
-		GPGStatus:   status,
-		done:        make(chan struct{}),
+		ID:           uuid.New().String(),
+		Client:       client,
+		CreatedAt:    now,
+		ExpiresAt:    now,
+		Type:         RequestTypeGPGSign,
+		GPGSignInfo:  info,
+		SenderInfo:   senderInfo,
+		AutoApproval: cloneAutoApprovalInfo(autoApproval),
+		Signature:    sig,
+		GPGStatus:    status,
+		done:         make(chan struct{}),
 	}
 	close(req.done)
 	m.notify(Event{Type: EventRequestAutoApproved, Request: req})

@@ -309,6 +309,7 @@ func makeHistoryEntry(req *approval.Request, resolution string) HistoryEntry {
 			Type:             string(req.Type),
 			SearchAttributes: req.SearchAttributes,
 			SenderInfo:       convertSenderInfo(req.SenderInfo),
+			AutoApproval:     req.AutoApproval,
 			GPGSignInfo:      req.GPGSignInfo,
 		},
 		Resolution: resolution,
@@ -486,6 +487,7 @@ func convertRequest(req *approval.Request) *PendingRequest {
 		Type:             string(req.Type),
 		SearchAttributes: req.SearchAttributes,
 		SenderInfo:       convertSenderInfo(req.SenderInfo),
+		AutoApproval:     req.AutoApproval,
 		GPGSignInfo:      req.GPGSignInfo,
 	}
 }

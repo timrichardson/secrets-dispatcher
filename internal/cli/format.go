@@ -109,6 +109,9 @@ func (f *Formatter) FormatShowResult(result *ShowResult) error {
 	f.formatRequest(&result.Request)
 	if result.Resolution != "" {
 		fmt.Fprintf(f.w, "Result:  %s\n", result.Resolution)
+		if result.Request.AutoApproval != nil {
+			fmt.Fprintf(f.w, "Rule:    %s\n", formatAutoApproval(result.Request.AutoApproval))
+		}
 		fmt.Fprintf(f.w, "Resolved: %s (%s)\n", result.ResolvedAt.Format(time.RFC3339), formatAgo(result.ResolvedAt))
 	}
 	return nil
@@ -237,8 +240,8 @@ func (f *Formatter) FormatHistory(entries []HistoryEntry) error {
 	}
 
 	// Print header
-	fmt.Fprintf(f.w, "%-8s  %-20s  %7s  %5s  %-12s  %-15s  %-10s  %-20s  %s\n", "ID", "CLIENT", "PID", "UID", "TYPE", "COLLECTION", "RESULT", "SUMMARY", "RESOLVED")
-	fmt.Fprintf(f.w, "%-8s  %-20s  %7s  %5s  %-12s  %-15s  %-10s  %-20s  %s\n", "--------", "--------------------", "-------", "-----", "------------", "---------------", "----------", "--------------------", "--------")
+	fmt.Fprintf(f.w, "%-8s  %-20s  %7s  %5s  %-12s  %-15s  %-10s  %-22s  %-20s  %s\n", "ID", "CLIENT", "PID", "UID", "TYPE", "COLLECTION", "RESULT", "RULE", "SUMMARY", "RESOLVED")
+	fmt.Fprintf(f.w, "%-8s  %-20s  %7s  %5s  %-12s  %-15s  %-10s  %-22s  %-20s  %s\n", "--------", "--------------------", "-------", "-----", "------------", "---------------", "----------", "----------------------", "--------------------", "--------")
 
 	for _, entry := range entries {
 		id := truncate(entry.Request.ID, 8)
@@ -251,12 +254,27 @@ func (f *Formatter) FormatHistory(entries []HistoryEntry) error {
 			coll = "-"
 		}
 		resolution := truncate(entry.Resolution, 10)
+		rule := truncate(formatAutoApproval(entry.Request.AutoApproval), 22)
 		secret := truncate(requestSummary(entry.Request), 20)
 		ago := formatAgo(entry.ResolvedAt)
 
-		fmt.Fprintf(f.w, "%-8s  %-20s  %7s  %5s  %-12s  %-15s  %-10s  %-20s  %s\n", id, client, pid, uid, reqType, coll, resolution, secret, ago)
+		fmt.Fprintf(f.w, "%-8s  %-20s  %7s  %5s  %-12s  %-15s  %-10s  %-22s  %-20s  %s\n", id, client, pid, uid, reqType, coll, resolution, rule, secret, ago)
 	}
 	return nil
+}
+
+func formatAutoApproval(info *AutoApprovalInfo) string {
+	if info == nil {
+		return "-"
+	}
+	label := info.Source
+	if info.RuleName != "" {
+		label = info.RuleName
+	}
+	if info.RuleID != "" {
+		return fmt.Sprintf("%s:%s (%s)", info.Source, label, truncate(info.RuleID, 8))
+	}
+	return label
 }
 
 func formatAgo(t time.Time) string {
