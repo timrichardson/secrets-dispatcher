@@ -647,6 +647,107 @@ func TestInstallLocalGnomeKeyringBackendPreset(t *testing.T) {
 	}
 }
 
+func TestInstallLocalGnomeKeyringMaskFailureFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+
+	origSystemctl := systemctlFunc
+	var calls []string
+	systemctlFunc = func(args ...string) error {
+		call := strings.Join(args, " ")
+		calls = append(calls, call)
+		if call == "mask --now gnome-keyring-daemon.service gnome-keyring-daemon.socket" {
+			return fmt.Errorf("mask failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() { systemctlFunc = origSystemctl })
+
+	mockExecOutput(t, noopExecOutput)
+	mockSystemctlOutput(t, func(args ...string) ([]byte, error) {
+		return []byte("enabled\n"), nil
+	})
+	mockLookPath(t, func(name string) (string, error) {
+		switch name {
+		case "dbus-daemon":
+			return "/usr/bin/dbus-daemon", nil
+		case "gnome-keyring-daemon":
+			return "/usr/bin/gnome-keyring-daemon", nil
+		default:
+			return "", fmt.Errorf("not found: %s", name)
+		}
+	})
+
+	err := Install(Options{Mode: "local", BackendPath: "gnome-keyring"})
+	if err == nil {
+		t.Fatal("expected install to fail when public GNOME Keyring masking fails")
+	}
+	if !strings.Contains(err.Error(), "mask public GNOME Keyring units") {
+		t.Fatalf("error should mention public GNOME Keyring masking, got: %v", err)
+	}
+	if !strings.Contains(strings.Join(calls, "\n"), "mask --now gnome-keyring-daemon.service gnome-keyring-daemon.socket") {
+		t.Fatalf("expected public GNOME Keyring mask attempt, calls: %v", calls)
+	}
+
+	dir := filepath.Join(tmpDir, "systemd", "user")
+	if _, statErr := os.Stat(filepath.Join(dir, "secrets-dispatcher-backend.service")); !os.IsNotExist(statErr) {
+		t.Fatalf("backend unit should not be written after mask failure")
+	}
+}
+
+func TestInstallLocalExplicitGnomeKeyringCommandMasksPublicUnits(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+
+	calls := mockSystemctl(t)
+	mockExecOutput(t, noopExecOutput)
+	mockSystemctlOutput(t, func(args ...string) ([]byte, error) {
+		return []byte("disabled\n"), nil
+	})
+	mockLookPath(t, func(name string) (string, error) {
+		if name == "dbus-daemon" {
+			return "/usr/bin/dbus-daemon", nil
+		}
+		return "", fmt.Errorf("not found: %s", name)
+	})
+
+	backend := "/usr/bin/gnome-keyring-daemon --foreground --components=secrets"
+	if err := Install(Options{Mode: "local", BackendPath: backend}); err != nil {
+		t.Fatalf("Install() error: %v", err)
+	}
+
+	callStr := strings.Join(*calls, "\n")
+	if !strings.Contains(callStr, "mask --now gnome-keyring-daemon.service gnome-keyring-daemon.socket") {
+		t.Fatalf("explicit GNOME Keyring backend should mask public units, calls:\n%s", callStr)
+	}
+	statePath := filepath.Join(tmpDir, "secrets-dispatcher", gnomeKeyringStateFile)
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("explicit GNOME Keyring backend should save state backup: %v", err)
+	}
+}
+
+func TestInstallRejectsBackendCommandWithNewline(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+
+	mockSystemctl(t)
+	mockLookPath(t, defaultLookPath)
+
+	err := Install(Options{Mode: "local", BackendPath: "/custom/backend\nEnvironment=BAD=1"})
+	if err == nil {
+		t.Fatal("expected newline in backend command to be rejected")
+	}
+	if !strings.Contains(err.Error(), "invalid backend command") {
+		t.Fatalf("error should mention invalid backend command, got: %v", err)
+	}
+}
+
 func TestInstallLocalGnomeKeyringStateBackupIsIdempotent(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
