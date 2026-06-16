@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -15,6 +16,13 @@ import (
 )
 
 const unitFileName = "secrets-dispatcher.service"
+
+const secureSystemUnitName = "secrets-dispatcher-secure@.service"
+
+var secureSystemUnitPaths = []string{
+	"/etc/systemd/system/" + secureSystemUnitName,
+	"/usr/lib/systemd/system/" + secureSystemUnitName,
+}
 
 // allUnitNames lists every unit file the package may install.
 var allUnitNames = []string{
@@ -114,10 +122,11 @@ type Options struct {
 	ConfigPath string
 	// Start the service immediately after enabling.
 	Start bool
-	// Mode selects the topology: "remote", "local", or "full" (default: "remote").
+	// Mode selects the topology: "remote", "local", "full", or "secure-local" (default: "remote").
 	Mode string
 	// BackendPath overrides the backend command for local/full modes.
 	// Special values: "gnome-keyring" or "gnome-keyring-daemon" use a GNOME Keyring preset.
+	// For secure-local, only "" and "gnome-keyring" are accepted.
 	BackendPath string
 }
 
@@ -135,6 +144,18 @@ var execOutputFunc = func(name string, args ...string) ([]byte, error) {
 var systemctlOutputFunc = func(args ...string) ([]byte, error) {
 	fullArgs := append([]string{"--user"}, args...)
 	return exec.Command("systemctl", fullArgs...).CombinedOutput()
+}
+
+var systemSystemctlFunc = systemSystemctlExec
+
+var secureProvisionedFunc = defaultSecureProvisioned
+
+var currentUsernameFunc = func() (string, error) {
+	u, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	return u.Username, nil
 }
 
 // unitDir returns the systemd user unit directory.
@@ -168,9 +189,17 @@ func Install(opts Options) error {
 		mode = "remote"
 	}
 	switch mode {
-	case "remote", "local", "full":
+	case "remote", "local", "full", "secure-local":
 	default:
-		return fmt.Errorf("unknown mode %q (must be remote, local, or full)", mode)
+		return fmt.Errorf("unknown mode %q (must be remote, local, full, or secure-local)", mode)
+	}
+	if mode == "secure-local" {
+		if opts.BackendPath != "" && opts.BackendPath != "gnome-keyring" {
+			return fmt.Errorf("secure-local only supports backend provider %q", "gnome-keyring")
+		}
+		if !secureProvisionedFunc() {
+			return fmt.Errorf("secure-local requires root provisioning first; run: sudo secrets-dispatcher provision --mode secure-local --user $USER")
+		}
 	}
 
 	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
@@ -219,11 +248,11 @@ func Install(opts Options) error {
 
 	// Mask/unmask D-Bus activation based on mode.
 	switch mode {
-	case "local", "full":
+	case "local", "full", "secure-local":
 		if err := maskDBusActivation(); err != nil {
 			return err
 		}
-		if usesGnomeKeyringBackend {
+		if usesGnomeKeyringBackend || mode == "secure-local" {
 			if err := saveGnomeKeyringState(); err != nil {
 				return err
 			}
@@ -256,6 +285,9 @@ func Install(opts Options) error {
 		needed["secrets-dispatcher-bus.service"] = fmt.Sprintf(busServiceTemplate, dbusDaemon)
 		needed["secrets-dispatcher-backend.service"] = fmt.Sprintf(backendServiceTemplate, backendCommand)
 		needed[unitFileName] = fmt.Sprintf(localProxyTemplate, execStart)
+	case "secure-local":
+		// Root provisioning installs and owns secrets-dispatcher-secure@.service.
+		// The user install path only manages user-owned config and activation masks.
 	}
 
 	// Write needed units; stop/disable/remove stale ones from a different mode.
@@ -291,19 +323,35 @@ func Install(opts Options) error {
 	if err := systemctlFunc("daemon-reload"); err != nil {
 		return err
 	}
-	if mode != "remote" {
+	if mode == "local" || mode == "full" {
 		if err := systemctlFunc("enable", "secrets-dispatcher-bus.socket"); err != nil {
 			return err
 		}
 		fmt.Println("Enabled secrets-dispatcher-bus.socket")
 	}
-	if err := systemctlFunc("enable", unitFileName); err != nil {
-		return err
+	if mode != "secure-local" {
+		if err := systemctlFunc("enable", unitFileName); err != nil {
+			return err
+		}
+		fmt.Printf("Enabled %s\n", unitFileName)
+	} else {
+		fmt.Println("Configured secure-local mode. The proxy is started by the root-managed secrets-dispatcher-secure@.service unit.")
 	}
-	fmt.Printf("Enabled %s\n", unitFileName)
 
 	if opts.Start {
-		if mode != "remote" {
+		if mode == "secure-local" {
+			username, err := currentUsernameFunc()
+			if err != nil {
+				return fmt.Errorf("determine current user for secure-local service: %w", err)
+			}
+			unit := secureInstanceUnit(username)
+			if err := systemSystemctlFunc("enable", "--now", unit); err != nil {
+				return err
+			}
+			fmt.Printf("Enabled and started %s\n", unit)
+			return nil
+		}
+		if mode == "local" || mode == "full" {
 			if err := systemctlFunc("start", "secrets-dispatcher-bus.socket"); err != nil {
 				return err
 			}
@@ -346,6 +394,14 @@ func updateTopologyConfig(configPath, runtimeDir, mode string) error {
 			{Type: "session_bus"},
 			{Type: "sockets", Path: socketsDir},
 		}
+		cfg.Serve.SecureBackend = nil
+	case "secure-local":
+		cfg.Serve.Upstream = config.BusConfig{Type: "inherited_fd"}
+		cfg.Serve.Downstream = []config.BusConfig{{Type: "session_bus"}}
+		cfg.Serve.SecureBackend = &config.SecureBackendConfig{Provider: "gnome-keyring"}
+	}
+	if mode == "remote" || mode == "local" {
+		cfg.Serve.SecureBackend = nil
 	}
 
 	data, err := yaml.Marshal(cfg)
@@ -436,6 +492,29 @@ func systemctlExec(args ...string) error {
 		return fmt.Errorf("systemctl %s: %w", args[0], err)
 	}
 	return nil
+}
+
+func systemSystemctlExec(args ...string) error {
+	cmd := exec.Command("systemctl", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("systemctl %s: %w", args[0], err)
+	}
+	return nil
+}
+
+func defaultSecureProvisioned() bool {
+	for _, path := range secureSystemUnitPaths {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func secureInstanceUnit(username string) string {
+	return "secrets-dispatcher-secure@" + username + ".service"
 }
 
 func resolveBackendCommand(backend string) (string, error) {

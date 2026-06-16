@@ -238,6 +238,14 @@ func TestValidate(t *testing.T) {
 			}},
 		},
 		{
+			name: "valid inherited fd upstream + session_bus downstream",
+			cfg: Config{Serve: ServeConfig{
+				Upstream:      BusConfig{Type: "inherited_fd"},
+				Downstream:    []BusConfig{{Type: "session_bus"}},
+				SecureBackend: &SecureBackendConfig{Provider: "gnome-keyring"},
+			}},
+		},
+		{
 			name: "invalid upstream type",
 			cfg: Config{Serve: ServeConfig{
 				Upstream:   BusConfig{Type: "sockets"},
@@ -252,6 +260,41 @@ func TestValidate(t *testing.T) {
 				Downstream: []BusConfig{{Type: "session_bus"}},
 			}},
 			wantErr: "requires a non-empty path",
+		},
+		{
+			name: "inherited fd upstream rejects path",
+			cfg: Config{Serve: ServeConfig{
+				Upstream:      BusConfig{Type: "inherited_fd", Path: "/run/up.sock"},
+				Downstream:    []BusConfig{{Type: "session_bus"}},
+				SecureBackend: &SecureBackendConfig{Provider: "gnome-keyring"},
+			}},
+			wantErr: "must not set path",
+		},
+		{
+			name: "inherited fd upstream requires provider",
+			cfg: Config{Serve: ServeConfig{
+				Upstream:   BusConfig{Type: "inherited_fd"},
+				Downstream: []BusConfig{{Type: "session_bus"}},
+			}},
+			wantErr: "requires secure_backend.provider",
+		},
+		{
+			name: "inherited fd upstream requires session bus only",
+			cfg: Config{Serve: ServeConfig{
+				Upstream:      BusConfig{Type: "inherited_fd"},
+				Downstream:    []BusConfig{{Type: "sockets", Path: "/run/socks"}},
+				SecureBackend: &SecureBackendConfig{Provider: "gnome-keyring"},
+			}},
+			wantErr: "requires exactly one session_bus downstream",
+		},
+		{
+			name: "unknown secure backend provider",
+			cfg: Config{Serve: ServeConfig{
+				Upstream:      BusConfig{Type: "inherited_fd"},
+				Downstream:    []BusConfig{{Type: "session_bus"}},
+				SecureBackend: &SecureBackendConfig{Provider: "other"},
+			}},
+			wantErr: "secure_backend.provider must be",
 		},
 		{
 			name: "sockets downstream missing path",

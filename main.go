@@ -22,9 +22,11 @@ import (
 	"github.com/nikicat/secrets-dispatcher/internal/companion"
 	"github.com/nikicat/secrets-dispatcher/internal/config"
 	"github.com/nikicat/secrets-dispatcher/internal/daemon"
+	"github.com/nikicat/secrets-dispatcher/internal/dbusconn"
 	"github.com/nikicat/secrets-dispatcher/internal/gpgsign"
 	"github.com/nikicat/secrets-dispatcher/internal/notification"
 	"github.com/nikicat/secrets-dispatcher/internal/proxy"
+	"github.com/nikicat/secrets-dispatcher/internal/securelocal"
 	"github.com/nikicat/secrets-dispatcher/internal/service"
 	"github.com/nikicat/secrets-dispatcher/internal/sshagent"
 	"gopkg.in/yaml.v3"
@@ -70,6 +72,8 @@ func main() {
 		runGPGSign(os.Args[2:])
 	case "provision":
 		runProvision(os.Args[2:])
+	case "secure-launch":
+		runSecureLaunch(os.Args[2:])
 	case "daemon":
 		runDaemon(os.Args[2:])
 	case "version":
@@ -98,7 +102,8 @@ Commands:
   service       Manage the systemd user service
   gpg-sign      GPG signing proxy (called by git as gpg.program)
   gpg-sign setup  Configure git to use secrets-dispatcher for GPG signing
-  provision     Provision companion user and deployment artifacts (requires root)
+  provision     Provision companion or secure-local deployment artifacts (requires root)
+  secure-launch Run the root-managed secure-local launcher (called by systemd)
   daemon        Run companion daemon (registers on system D-Bus)
   version       Print the version and exit
 
@@ -484,7 +489,7 @@ func runServe(args []string) {
 			sp := &staticProvider{info: proxy.ClientInfo{Name: "local", SocketPath: "session_bus"}}
 			providers = append(providers, sp)
 			runners = append(runners, func(ctx context.Context) error {
-				if upstreamAddr == "" {
+				if cfg.Serve.Upstream.Type == "session_bus" {
 					return fmt.Errorf("upstream and downstream are both session_bus (should be caught by validation)")
 				}
 				const maxBackoff = 30 * time.Second
@@ -501,7 +506,7 @@ func runServe(args []string) {
 					frontConn, err := dbus.ConnectSessionBus()
 					if err == nil {
 						var backendConn *dbus.Conn
-						backendConn, err = dbus.Connect(upstreamAddr)
+						backendConn, err = connectUpstream(cfg.Serve.Upstream, upstreamAddr)
 						if err != nil {
 							frontConn.Close()
 						} else {
@@ -515,6 +520,9 @@ func runServe(args []string) {
 					}
 					if ctx.Err() != nil {
 						return ctx.Err()
+					}
+					if cfg.Serve.Upstream.Type == "inherited_fd" {
+						return fmt.Errorf("secure-local upstream disconnected; restart the secure launcher to obtain a new inherited backend FD: %w", err)
 					}
 					slog.Warn("session bus downstream disconnected, reconnecting",
 						"error", err, "after", backoff)
@@ -546,11 +554,7 @@ func runServe(args []string) {
 					return fmt.Errorf("connect to downstream socket %s: %w", ds.Path, connErr)
 				}
 				var backendConn *dbus.Conn
-				if upstreamAddr == "" {
-					backendConn, connErr = dbus.ConnectSessionBus()
-				} else {
-					backendConn, connErr = dbus.Connect(upstreamAddr)
-				}
+				backendConn, connErr = connectUpstream(cfg.Serve.Upstream, upstreamAddr)
 				if connErr != nil {
 					frontConn.Close()
 					return fmt.Errorf("connect to upstream: %w", connErr)
@@ -677,6 +681,22 @@ func runServe(args []string) {
 		}(i, run)
 	}
 	wg.Wait()
+}
+
+func connectUpstream(upstream config.BusConfig, upstreamAddr string) (*dbus.Conn, error) {
+	switch upstream.Type {
+	case "session_bus":
+		return dbus.ConnectSessionBus()
+	case "socket":
+		if upstreamAddr == "" {
+			upstreamAddr = "unix:path=" + upstream.Path
+		}
+		return dbus.Connect(upstreamAddr)
+	case "inherited_fd":
+		return dbusconn.ConnectInheritedEnv()
+	default:
+		return nil, fmt.Errorf("unsupported upstream type %q", upstream.Type)
+	}
 }
 
 // staticProvider wraps a single client info for the API ClientProvider interface.
@@ -908,8 +928,8 @@ func runServiceInstall(args []string) {
 	fs := flag.NewFlagSet("service install", flag.ExitOnError)
 	start := fs.Bool("start", false, "Start the service immediately after installing")
 	configPath := fs.String("config", "", "Config file path (default: $XDG_CONFIG_HOME/secrets-dispatcher/config.yaml)")
-	mode := fs.String("mode", "remote", "Topology mode: remote, local, or full")
-	backend := fs.String("backend", "", "Backend command or preset for local/full modes (default: gopass-secret-service; preset: gnome-keyring)")
+	mode := fs.String("mode", "remote", "Topology mode: remote, local, full, or secure-local")
+	backend := fs.String("backend", "", "Backend command or preset for local/full modes; provider for secure-local (default/preset: gnome-keyring)")
 	fs.Parse(args)
 
 	if err := service.Install(service.Options{
@@ -934,8 +954,8 @@ Commands:
 Install options:
   --start       Start the service immediately after installing
   --config      Config file path (default: $XDG_CONFIG_HOME/secrets-dispatcher/config.yaml)
-  --mode        Topology mode: remote, local, or full (default: remote)
-  --backend     Backend command or preset for local/full modes (default: gopass-secret-service; preset: gnome-keyring)
+  --mode        Topology mode: remote, local, full, or secure-local (default: remote)
+  --backend     Backend command or preset for local/full; provider for secure-local (default/preset: gnome-keyring)
 `, progName)
 }
 
@@ -972,12 +992,56 @@ func runGPGSignSetup(args []string) {
 // Without --check, it creates the companion user and all deployment artifacts.
 // With --check, it validates an existing deployment and prints pass/fail per component.
 func runProvision(args []string) {
+	modeDefault := "companion"
+	if len(args) > 0 && args[0] == "secure-backend" {
+		modeDefault = "secure-local"
+		args = args[1:]
+	}
 	fs := flag.NewFlagSet("provision", flag.ExitOnError)
+	mode := fs.String("mode", modeDefault, "Provisioning mode: companion or secure-local")
 	desktopUser := fs.String("user", "", "Desktop username to provision companion for (default: $SUDO_USER)")
 	companionName := fs.String("companion-name", "", "Override companion username (default: secrets-{user})")
+	backendUser := fs.String("backend-user", "", "Override secure-local backend username (default: secrets-{user})")
+	backend := fs.String("backend", "gnome-keyring", "Secure-local backend provider")
 	homeBase := fs.String("home-base", "/var/lib/secret-companion", "Parent directory for companion homes")
+	binaryPath := fs.String("binary", "/usr/local/bin/secrets-dispatcher", "Root-owned secrets-dispatcher binary path for secure-local systemd unit")
 	check := fs.Bool("check", false, "Validate deployment instead of provisioning")
 	fs.Parse(args)
+
+	if *mode == "secure-local" {
+		cfg := securelocal.ProvisionConfig{
+			DesktopUser: *desktopUser,
+			BackendUser: *backendUser,
+			HomeBase:    *homeBase,
+			Provider:    *backend,
+			BinaryPath:  *binaryPath,
+		}
+		if *check {
+			results := securelocal.Check(cfg)
+			allPass := true
+			for _, r := range results {
+				status := "[PASS]"
+				if !r.Pass {
+					status = "[FAIL]"
+					allPass = false
+				}
+				fmt.Printf("%s %s: %s\n", status, r.Name, r.Message)
+			}
+			if !allPass {
+				os.Exit(1)
+			}
+			return
+		}
+		if err := securelocal.Provision(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *mode != "companion" {
+		fmt.Fprintf(os.Stderr, "error: unknown provision mode %q (must be companion or secure-local)\n", *mode)
+		os.Exit(1)
+	}
 
 	cfg := companion.Config{
 		DesktopUser:   *desktopUser,
@@ -1003,6 +1067,35 @@ func runProvision(args []string) {
 	}
 
 	if err := companion.Provision(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runSecureLaunch(args []string) {
+	fs := flag.NewFlagSet("secure-launch", flag.ExitOnError)
+	desktopUser := fs.String("user", "", "Desktop username whose session bus will receive org.freedesktop.secrets")
+	backendUser := fs.String("backend-user", "", "Backend username (default: secrets-{user})")
+	backend := fs.String("backend", "gnome-keyring", "Secure backend provider")
+	homeBase := fs.String("backend-home-base", "/var/lib/secret-companion", "Parent directory for backend homes")
+	configPath := fs.String("config", "", "Desktop user's secrets-dispatcher config path")
+	binaryPath := fs.String("binary", "", "secrets-dispatcher binary used to start the desktop-user proxy (default: current executable)")
+	dbusDaemon := fs.String("dbus-daemon", "dbus-daemon", "dbus-daemon binary path")
+	fs.Parse(args)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	cfg := securelocal.LaunchConfig{
+		DesktopUser:    *desktopUser,
+		BackendUser:    *backendUser,
+		HomeBase:       *homeBase,
+		Provider:       *backend,
+		ConfigPath:     *configPath,
+		BinaryPath:     *binaryPath,
+		DBusDaemonPath: *dbusDaemon,
+	}
+	if err := securelocal.RunLauncher(ctx, cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
