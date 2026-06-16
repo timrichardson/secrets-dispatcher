@@ -50,6 +50,32 @@ func mockSystemctl(t *testing.T) *[]string {
 	return &calls
 }
 
+func mockSystemSystemctl(t *testing.T) *[]string {
+	t.Helper()
+	orig := systemSystemctlFunc
+	var calls []string
+	systemSystemctlFunc = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() { systemSystemctlFunc = orig })
+	return &calls
+}
+
+func mockSecureProvisioned(t *testing.T, provisioned bool) {
+	t.Helper()
+	orig := secureProvisionedFunc
+	secureProvisionedFunc = func() bool { return provisioned }
+	t.Cleanup(func() { secureProvisionedFunc = orig })
+}
+
+func mockCurrentUsername(t *testing.T, username string) {
+	t.Helper()
+	orig := currentUsernameFunc
+	currentUsernameFunc = func() (string, error) { return username, nil }
+	t.Cleanup(func() { currentUsernameFunc = orig })
+}
+
 func defaultLookPath(name string) (string, error) {
 	return "/usr/bin/" + name, nil
 }
@@ -433,6 +459,128 @@ func TestInstallFullWritesAllUnits(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("unit file %s not found: %v", name, err)
 		}
+	}
+}
+
+// --- secure-local mode ---
+
+func TestInstallSecureLocalConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+
+	mockSecureProvisioned(t, true)
+	mockSystemctl(t)
+	mockExecOutput(t, noopExecOutput)
+	mockSystemctlOutput(t, func(args ...string) ([]byte, error) {
+		return []byte("disabled\n"), nil
+	})
+
+	if err := Install(Options{Mode: "secure-local"}); err != nil {
+		t.Fatalf("Install() error: %v", err)
+	}
+
+	configPath := filepath.Join(tmpDir, "secrets-dispatcher", "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	var cfg config.Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg.Serve.Upstream.Type != "inherited_fd" {
+		t.Fatalf("upstream type = %q, want inherited_fd", cfg.Serve.Upstream.Type)
+	}
+	if cfg.Serve.Upstream.Path != "" {
+		t.Fatalf("upstream path = %q, want empty", cfg.Serve.Upstream.Path)
+	}
+	if len(cfg.Serve.Downstream) != 1 || cfg.Serve.Downstream[0].Type != "session_bus" {
+		t.Fatalf("downstream = %+v, want one session_bus", cfg.Serve.Downstream)
+	}
+	if cfg.Serve.SecureBackend == nil || cfg.Serve.SecureBackend.Provider != "gnome-keyring" {
+		t.Fatalf("secure_backend = %+v, want gnome-keyring", cfg.Serve.SecureBackend)
+	}
+}
+
+func TestInstallSecureLocalWritesNoUserUnits(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+
+	mockSecureProvisioned(t, true)
+	calls := mockSystemctl(t)
+	mockExecOutput(t, noopExecOutput)
+	mockSystemctlOutput(t, func(args ...string) ([]byte, error) {
+		return []byte("disabled\n"), nil
+	})
+
+	dir := filepath.Join(tmpDir, "systemd", "user")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range allUnitNames {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("stale"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := Install(Options{Mode: "secure-local"}); err != nil {
+		t.Fatalf("Install() error: %v", err)
+	}
+	for _, name := range allUnitNames {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("secure-local should remove stale user unit %s", name)
+		}
+	}
+	callStr := strings.Join(*calls, "\n")
+	if strings.Contains(callStr, "enable secrets-dispatcher.service") || strings.Contains(callStr, "enable secrets-dispatcher-bus.socket") {
+		t.Fatalf("secure-local should not enable user units, calls:\n%s", callStr)
+	}
+}
+
+func TestInstallSecureLocalRequiresProvisioning(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+
+	mockSecureProvisioned(t, false)
+	mockSystemctl(t)
+
+	err := Install(Options{Mode: "secure-local"})
+	if err == nil {
+		t.Fatal("Install() error = nil, want provisioning error")
+	}
+	if !strings.Contains(err.Error(), "provision") {
+		t.Fatalf("error should mention provisioning, got: %v", err)
+	}
+}
+
+func TestInstallSecureLocalStartSystemUnit(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+
+	mockSecureProvisioned(t, true)
+	mockSystemctl(t)
+	systemCalls := mockSystemSystemctl(t)
+	mockCurrentUsername(t, "tim")
+	mockExecOutput(t, noopExecOutput)
+	mockSystemctlOutput(t, func(args ...string) ([]byte, error) {
+		return []byte("disabled\n"), nil
+	})
+
+	if err := Install(Options{Mode: "secure-local", Start: true}); err != nil {
+		t.Fatalf("Install() error: %v", err)
+	}
+	want := "enable --now secrets-dispatcher-secure@tim.service"
+	if len(*systemCalls) != 1 || (*systemCalls)[0] != want {
+		t.Fatalf("system systemctl calls = %v, want [%q]", *systemCalls, want)
 	}
 }
 

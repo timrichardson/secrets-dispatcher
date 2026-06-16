@@ -31,8 +31,13 @@ var defaultIgnoreChromeDummySecret = true
 
 // BusConfig describes a D-Bus endpoint (upstream backend or downstream front).
 type BusConfig struct {
-	Type string `yaml:"type"`           // "session_bus", "socket", "sockets"
+	Type string `yaml:"type"`           // "session_bus", "socket", "sockets", or upstream-only "inherited_fd"
 	Path string `yaml:"path,omitempty"` // required for "socket" and "sockets" types
+}
+
+// SecureBackendConfig configures secure-local's private backend provider.
+type SecureBackendConfig struct {
+	Provider string `yaml:"provider"`
 }
 
 // WithDefaults returns a copy of cfg with zero-value fields filled from program defaults.
@@ -93,12 +98,20 @@ func (cfg *Config) Validate() error {
 	s := &cfg.Serve
 
 	switch s.Upstream.Type {
-	case "session_bus", "socket":
+	case "session_bus", "socket", "inherited_fd":
 	default:
-		return fmt.Errorf("upstream type must be \"session_bus\" or \"socket\", got %q", s.Upstream.Type)
+		return fmt.Errorf("upstream type must be \"session_bus\", \"socket\", or \"inherited_fd\", got %q", s.Upstream.Type)
 	}
 	if s.Upstream.Type == "socket" && s.Upstream.Path == "" {
 		return fmt.Errorf("upstream type \"socket\" requires a non-empty path")
+	}
+	if s.Upstream.Type == "inherited_fd" && s.Upstream.Path != "" {
+		return fmt.Errorf("upstream type \"inherited_fd\" must not set path")
+	}
+	if s.SecureBackend != nil {
+		if s.SecureBackend.Provider != "gnome-keyring" {
+			return fmt.Errorf("secure_backend.provider must be \"gnome-keyring\", got %q", s.SecureBackend.Provider)
+		}
 	}
 
 	hasSessionBusDown := false
@@ -120,6 +133,14 @@ func (cfg *Config) Validate() error {
 
 	if s.Upstream.Type == "session_bus" && hasSessionBusDown {
 		return fmt.Errorf("upstream and downstream cannot both be session_bus (same bus)")
+	}
+	if s.Upstream.Type == "inherited_fd" {
+		if s.SecureBackend == nil || s.SecureBackend.Provider == "" {
+			return fmt.Errorf("upstream type \"inherited_fd\" requires secure_backend.provider")
+		}
+		if len(s.Downstream) != 1 || s.Downstream[0].Type != "session_bus" {
+			return fmt.Errorf("upstream type \"inherited_fd\" requires exactly one session_bus downstream")
+		}
 	}
 
 	// Validate trust rules
@@ -239,23 +260,24 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 
 // ServeConfig holds serve-subcommand settings.
 type ServeConfig struct {
-	Upstream                BusConfig       `yaml:"upstream"`
-	Downstream              []BusConfig     `yaml:"downstream"`
-	LogLevel                string          `yaml:"log_level"`
-	LogFormat               string          `yaml:"log_format"`
-	Timeout                 Duration        `yaml:"timeout"`
-	HistoryLimit            int             `yaml:"history_limit"`
-	Notifications           *bool           `yaml:"notifications"`
-	ShowPIDs                *bool           `yaml:"show_pids"`
-	TrimProcessChain        *bool           `yaml:"trim_process_chain"`
-	ApprovalWindow          Duration        `yaml:"approval_window"`
-	AutoApproveDuration     Duration        `yaml:"auto_approve_duration"`
-	NotificationDelay       Duration        `yaml:"notification_delay"`
-	TrustedSigners          []TrustedSigner `yaml:"trusted_signers,omitempty"`
-	IgnoreChromeDummySecret *bool           `yaml:"ignore_chrome_dummy_secret"`
-	UpstreamSlowThreshold   *Duration       `yaml:"upstream_slow_threshold"`        // 0 disables; default 1.5s
-	UpstreamSlowAlways      *bool           `yaml:"upstream_slow_always,omitempty"` // show for all requests, not just auto-approved
-	Rules                   []TrustRule     `yaml:"rules,omitempty"`
+	Upstream                BusConfig            `yaml:"upstream"`
+	Downstream              []BusConfig          `yaml:"downstream"`
+	LogLevel                string               `yaml:"log_level"`
+	LogFormat               string               `yaml:"log_format"`
+	Timeout                 Duration             `yaml:"timeout"`
+	HistoryLimit            int                  `yaml:"history_limit"`
+	Notifications           *bool                `yaml:"notifications"`
+	ShowPIDs                *bool                `yaml:"show_pids"`
+	TrimProcessChain        *bool                `yaml:"trim_process_chain"`
+	ApprovalWindow          Duration             `yaml:"approval_window"`
+	AutoApproveDuration     Duration             `yaml:"auto_approve_duration"`
+	NotificationDelay       Duration             `yaml:"notification_delay"`
+	TrustedSigners          []TrustedSigner      `yaml:"trusted_signers,omitempty"`
+	IgnoreChromeDummySecret *bool                `yaml:"ignore_chrome_dummy_secret"`
+	UpstreamSlowThreshold   *Duration            `yaml:"upstream_slow_threshold"`        // 0 disables; default 1.5s
+	UpstreamSlowAlways      *bool                `yaml:"upstream_slow_always,omitempty"` // show for all requests, not just auto-approved
+	SecureBackend           *SecureBackendConfig `yaml:"secure_backend,omitempty"`
+	Rules                   []TrustRule          `yaml:"rules,omitempty"`
 }
 
 // TrustedSigner defines a process that is auto-approved for GPG signing.
