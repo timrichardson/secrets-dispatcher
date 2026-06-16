@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { PendingRequest } from "./types";
-  import { approve, approveAndAutoApprove, deny, ApiError } from "./api";
+  import { approve, approveAndAutoApprove, createApprovalRuleFromRequest, deny, ApiError } from "./api";
   import ProcessChain from "./ProcessChain.svelte";
 
   interface Props {
@@ -11,7 +11,7 @@
 
   let { request, onAction, autoApproveDurationSeconds }: Props = $props();
 
-  let loading = $state<"approve" | "approve_auto" | "deny" | null>(null);
+  let loading = $state<"approve" | "approve_auto" | "save_rule" | "deny" | null>(null);
 
   function formatDurationShort(seconds: number): string {
     const m = Math.floor(seconds / 60);
@@ -130,6 +130,22 @@
         error = e.message;
       } else {
         error = "Failed to approve";
+      }
+    } finally {
+      loading = null;
+    }
+  }
+
+  async function handleSaveRule() {
+    loading = "save_rule";
+    error = null;
+    try {
+      await createApprovalRuleFromRequest(request.id);
+    } catch (e) {
+      if (e instanceof ApiError) {
+        error = e.message;
+      } else {
+        error = "Failed to save rule";
       }
     } finally {
       loading = null;
@@ -345,7 +361,7 @@
       {#if loading === "approve"}
         Approving...
       {:else}
-        Approve once
+        Approve
       {/if}
     </button>
     <button
@@ -360,6 +376,18 @@
         Approve similar
       {/if}
     </button>
+    <button
+      class="btn-save-rule"
+      onclick={handleSaveRule}
+      disabled={loading !== null}
+      title="Create a saved approval rule without resolving this request"
+    >
+      {#if loading === "save_rule"}
+        Saving rule...
+      {:else}
+        Save rule
+      {/if}
+    </button>
     <button class="btn-deny" onclick={handleDeny} disabled={loading !== null}>
       {#if loading === "deny"}
         Denying...
@@ -369,7 +397,7 @@
     </button>
   </div>
   <p class="action-help">
-    “Approve similar” also allows matching requests for {formatDurationShort(autoApproveDurationSeconds)}.
+    "Approve similar" also allows matching requests for {formatDurationShort(autoApproveDurationSeconds)}. "Save rule" makes a persistent rule without approving this request.
   </p>
 </div>
 
@@ -578,7 +606,18 @@
 
   .actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 12px;
+  }
+
+  .btn-save-rule {
+    background-color: var(--color-surface);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+  }
+
+  .btn-save-rule:hover:not(:disabled) {
+    background-color: var(--color-surface-hover);
   }
 
   .action-help {

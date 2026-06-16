@@ -3,6 +3,7 @@ import type {
   AutoApproveRule,
   ErrorResponse,
   PendingListResponse,
+  SavedApprovalRule,
   StatusResponse,
 } from "./types";
 
@@ -162,6 +163,70 @@ export async function deleteAutoApproveRule(
   id: string,
 ): Promise<ActionResponse> {
   const result = await request<ActionResponse>(`/auto-approve/${id}`, {
+    method: "DELETE",
+  });
+  if (result === null) {
+    throw new ApiError(401, "Unauthenticated");
+  }
+  return result;
+}
+
+/** Persist a temporary auto-approve rule as a saved approval rule. */
+export async function persistAutoApproveRule(
+  id: string,
+): Promise<SavedApprovalRule> {
+  const result = await request<SavedApprovalRule>(`/auto-approve/${id}/persist`, {
+    method: "POST",
+  });
+  if (result === null) {
+    throw new ApiError(401, "Unauthenticated");
+  }
+  return result;
+}
+
+/** List saved approval rules. */
+export async function listApprovalRules(): Promise<SavedApprovalRule[]> {
+  const result = await request<SavedApprovalRule[]>("/approval-rules");
+  if (result === null) {
+    throw new ApiError(401, "Unauthenticated");
+  }
+  return result;
+}
+
+/** Create a saved approval rule from a pending or recent history request. */
+export async function createApprovalRuleFromRequest(
+  requestId: string,
+): Promise<SavedApprovalRule> {
+  const result = await request<SavedApprovalRule>("/approval-rules/from-request", {
+    method: "POST",
+    body: JSON.stringify({ request_id: requestId }),
+  });
+  if (result === null) {
+    throw new ApiError(401, "Unauthenticated");
+  }
+  return result;
+}
+
+/** Update a saved approval rule. */
+export async function updateApprovalRule(
+  id: string,
+  rule: SavedApprovalRule,
+): Promise<SavedApprovalRule> {
+  const result = await request<SavedApprovalRule>(`/approval-rules/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(rule),
+  });
+  if (result === null) {
+    throw new ApiError(401, "Unauthenticated");
+  }
+  return result;
+}
+
+/** Delete a saved approval rule. */
+export async function deleteApprovalRule(
+  id: string,
+): Promise<ActionResponse> {
+  const result = await request<ActionResponse>(`/approval-rules/${id}`, {
     method: "DELETE",
   });
   if (result === null) {

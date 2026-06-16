@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { HistoryEntry as HistoryEntryType, PendingRequest, AutoApproveRule } from "./types";
+  import type { HistoryEntry as HistoryEntryType, PendingRequest, AutoApproveRule, SavedApprovalRule } from "./types";
   import ProcessChain from "./ProcessChain.svelte";
   import PropsTable from "./PropsTable.svelte";
 
@@ -8,12 +8,14 @@
     count?: number;
     tick: number;
     autoApproveRules: AutoApproveRule[];
+    approvalRules: SavedApprovalRule[];
     formatTime: (dateString: string) => string;
     toggleTimeFormat: () => void;
     onAutoApprove: (requestId: string) => void;
+    onSaveRule: (requestId: string) => void;
   }
 
-  let { entry, count = 1, tick, autoApproveRules, formatTime, toggleTimeFormat, onAutoApprove }: Props = $props();
+  let { entry, count = 1, tick, autoApproveRules, approvalRules, formatTime, toggleTimeFormat, onAutoApprove, onSaveRule }: Props = $props();
 
   function resolutionClass(resolution: string): string {
     switch (resolution) {
@@ -116,6 +118,24 @@
       attributesEqual(r.attributes, attrs)
     );
   }
+
+  function hasMatchingSavedRule(entry: HistoryEntryType): boolean {
+    const req = entry.request;
+    const invoker = req.sender_info?.unit_name ?? "";
+    const collection = req.items.length > 0 ? extractCollection(req.items[0].path) : "";
+    const attrs = req.type === "search" ? req.search_attributes : (req.items.length > 0 ? req.items[0].attributes : undefined);
+    return approvalRules.some(r =>
+      r.enabled &&
+      r.request_types.includes(req.type) &&
+      (r.process?.unit === invoker || r.process?.name === invoker) &&
+      (r.secret?.collection ?? "") === collection &&
+      attributesEqual(r.secret?.attributes ?? r.search_attributes, attrs)
+    );
+  }
+
+  function canSaveRule(entry: HistoryEntryType): boolean {
+    return entry.resolution === "approved" || entry.resolution === "cancelled" || entry.resolution === "auto_approved";
+  }
 </script>
 
 <li class="history-entry">
@@ -157,6 +177,13 @@
       title="Create or refresh a temporary rule for future requests like this"
       onclick={() => onAutoApprove(entry.request.id)}
     >{hasMatchingRule(entry) ? "Refresh similar rule" : "Allow future similar"}</button>
+  {/if}
+  {#if canSaveRule(entry)}
+    <button
+      class="btn-auto-approve"
+      title="Create a saved approval rule for future requests like this"
+      onclick={() => onSaveRule(entry.request.id)}
+    >{hasMatchingSavedRule(entry) ? "Saved rule active" : "Save as approval rule"}</button>
   {/if}
 </li>
 
