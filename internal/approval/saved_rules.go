@@ -415,6 +415,62 @@ func matchSavedApprovalRule(rule *SavedApprovalRule, senderInfo SenderInfo, item
 	return matchTrustRule(&trust, senderInfo, items, reqType, searchAttrs)
 }
 
+// NewSavedDecisionAttribution returns history attribution for a saved approval rule match.
+func NewSavedDecisionAttribution(rule *SavedApprovalRule) *DecisionAttribution {
+	if rule == nil {
+		return nil
+	}
+	cloned := cloneSavedApprovalRule(*rule)
+	return &DecisionAttribution{
+		Source:           "saved_rule",
+		Action:           "approve",
+		RuleID:           cloned.ID,
+		RuleName:         cloned.Name,
+		RuleRequestTypes: cloned.RequestTypes,
+		Process:          cloned.Process,
+		Secret:           cloned.Secret,
+		SearchAttributes: cloned.SearchAttributes,
+	}
+}
+
+// LogSavedApprovalRuleMatch logs the saved rule and request fields that matched.
+func LogSavedApprovalRuleMatch(rule *SavedApprovalRule, senderInfo SenderInfo, items []ItemInfo, reqType RequestType, searchAttrs map[string]string, client string) {
+	if rule == nil {
+		return
+	}
+	attrs := map[string]string{}
+	label := ""
+	pathValue := ""
+	collection := ""
+	if len(items) > 0 {
+		attrs = items[0].Attributes
+		label = items[0].Label
+		pathValue = items[0].Path
+		collection = extractCollection(items[0].Path)
+	}
+	slog.Info("saved approval rule matched",
+		"rule_id", rule.ID,
+		"rule_name", rule.Name,
+		"rule_enabled", rule.Enabled,
+		"rule_request_types", rule.RequestTypes,
+		"rule_process", rule.Process,
+		"rule_secret", rule.Secret,
+		"rule_search_attributes", rule.SearchAttributes,
+		"request_client", client,
+		"request_type", reqType,
+		"request_sender", senderInfo.Sender,
+		"request_pid", senderInfo.PID,
+		"request_uid", senderInfo.UID,
+		"request_invoker", senderInfo.UnitName,
+		"request_process_chain", senderInfo.ProcessChain,
+		"request_collection", collection,
+		"request_label", label,
+		"request_path", pathValue,
+		"request_attributes", attrs,
+		"request_search_attributes", searchAttrs,
+	)
+}
+
 func (m *Manager) saveSavedRulesLocked(rules []SavedApprovalRule) error {
 	if m.savedRulesStore == nil {
 		return nil
@@ -541,15 +597,4 @@ func cloneSavedApprovalRule(in SavedApprovalRule) SavedApprovalRule {
 		in.Secret = &secret
 	}
 	return in
-}
-
-func cloneStringMap(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
 }

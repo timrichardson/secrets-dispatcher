@@ -420,11 +420,9 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 
 	// Check user-managed saved approval rules.
 	if rule := m.checkSavedApprovalRules(senderInfo, items, reqType, searchAttrs); rule != nil {
-		slog.Info("saved approval rule matched",
-			"rule_id", rule.ID,
-			"rule_name", rule.Name,
-			"type", reqType)
-		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(nil)})
+		attribution := NewSavedDecisionAttribution(rule)
+		LogSavedApprovalRuleMatch(rule, senderInfo, items, reqType, searchAttrs, client)
+		m.notify(Event{Type: EventRequestAutoApproved, Request: newResolvedRequest(attribution)})
 		return true, nil
 	}
 
