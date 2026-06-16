@@ -44,6 +44,7 @@ func TestAutoApproveRule_MatchesRetry(t *testing.T) {
 			Attributes: map[string]string{"service": "gh:github.com", "extra": "val"},
 		}},
 		RequestTypeWrite,
+		nil,
 	)
 	if rule == nil {
 		t.Fatal("expected auto-approve rule to match retry request")
@@ -101,6 +102,7 @@ func TestAutoApproveRule_DifferentInvokerNoMatch(t *testing.T) {
 		testSender("seahorse", "/usr/bin/seahorse"),
 		[]ItemInfo{{Path: "/org/freedesktop/secrets/collection/default/i1"}},
 		RequestTypeGetSecret,
+		nil,
 	)
 	if rule != nil {
 		t.Fatal("expected no match for different invoker")
@@ -124,6 +126,7 @@ func TestAutoApproveRule_Expiry(t *testing.T) {
 		testSender("gh", "/usr/bin/gh"),
 		[]ItemInfo{{Path: "/org/freedesktop/secrets/collection/default/i1"}},
 		RequestTypeGetSecret,
+		nil,
 	)
 	if rule != nil {
 		t.Fatal("expected expired rule not to match")
@@ -225,6 +228,7 @@ func TestAutoApproveRule_AttributeSubsetMatch(t *testing.T) {
 			Attributes: map[string]string{"service": "gh:github.com", "user": "nb"},
 		}},
 		RequestTypeGetSecret,
+		nil,
 	)
 	if rule == nil {
 		t.Fatal("expected subset attribute match")
@@ -238,9 +242,66 @@ func TestAutoApproveRule_AttributeSubsetMatch(t *testing.T) {
 			Attributes: map[string]string{"service": "other:example.com"},
 		}},
 		RequestTypeGetSecret,
+		nil,
 	)
 	if rule != nil {
 		t.Fatal("expected no match for different attribute value")
+	}
+}
+
+func TestAutoApproveRule_UsesProcessMatcherWhenAvailable(t *testing.T) {
+	mgr := NewManager(ManagerConfig{Timeout: 5 * time.Second, HistoryMax: 100, AutoApproveDuration: 2 * time.Minute})
+	mgr.AddAutoApproveRule(&Request{
+		ID:    "req-1",
+		Type:  RequestTypeGetSecret,
+		Items: []ItemInfo{{Path: "/org/freedesktop/secrets/collection/default/i1"}},
+		SenderInfo: SenderInfo{
+			UnitName:     "gh",
+			ProcessChain: []ProcessInfo{{Name: "gh", PID: 1, Exe: "/usr/bin/gh"}},
+		},
+	})
+
+	if rule := mgr.checkAutoApproveRules(
+		SenderInfo{UnitName: "gh", ProcessChain: []ProcessInfo{{Name: "gh", PID: 2, Exe: "/tmp/gh"}}},
+		[]ItemInfo{{Path: "/org/freedesktop/secrets/collection/default/i2"}},
+		RequestTypeGetSecret,
+		nil,
+	); rule != nil {
+		t.Fatalf("expected spoofed process name with different exe not to match: %#v", rule)
+	}
+
+	if rule := mgr.checkAutoApproveRules(
+		SenderInfo{UnitName: "different", ProcessChain: []ProcessInfo{{Name: "gh", PID: 3, Exe: "/usr/bin/gh"}}},
+		[]ItemInfo{{Path: "/org/freedesktop/secrets/collection/default/i2"}},
+		RequestTypeGetSecret,
+		nil,
+	); rule == nil {
+		t.Fatal("expected matching executable path to match")
+	}
+}
+
+func TestAutoApproveRule_MultiItemRequiresEveryItemToMatch(t *testing.T) {
+	mgr := NewManager(ManagerConfig{Timeout: 5 * time.Second, HistoryMax: 100, AutoApproveDuration: 2 * time.Minute})
+	mgr.AddAutoApproveRule(&Request{
+		ID:   "req-1",
+		Type: RequestTypeGetSecret,
+		Items: []ItemInfo{{
+			Path:       "/org/freedesktop/secrets/collection/default/i1",
+			Attributes: map[string]string{"service": "github"},
+		}},
+		SenderInfo: SenderInfo{UnitName: "gh"},
+	})
+
+	if rule := mgr.checkAutoApproveRules(
+		SenderInfo{UnitName: "gh"},
+		[]ItemInfo{
+			{Path: "/org/freedesktop/secrets/collection/default/i2", Attributes: map[string]string{"service": "github"}},
+			{Path: "/org/freedesktop/secrets/collection/default/i3", Attributes: map[string]string{"service": "bank"}},
+		},
+		RequestTypeGetSecret,
+		nil,
+	); rule != nil {
+		t.Fatalf("expected mixed multi-item request not to match: %#v", rule)
 	}
 }
 

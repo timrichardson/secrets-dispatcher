@@ -137,7 +137,10 @@ func ValidateSavedApprovalRule(rule *SavedApprovalRule) error {
 		return fmt.Errorf("%w: request_types must not be empty", ErrInvalidRule)
 	}
 	for _, rt := range rule.RequestTypes {
-		if !validRequestType(rt) {
+		if RequestType(rt) == RequestTypeGPGSign {
+			return fmt.Errorf("%w: request_type %q is not supported for saved approval rules", ErrInvalidRule, rt)
+		}
+		if !validSavedRequestType(rt) {
 			return fmt.Errorf("%w: invalid request_type %q", ErrInvalidRule, rt)
 		}
 	}
@@ -175,10 +178,10 @@ func ValidateSavedApprovalRule(rule *SavedApprovalRule) error {
 	return nil
 }
 
-func validRequestType(rt string) bool {
+func validSavedRequestType(rt string) bool {
 	switch RequestType(rt) {
 	case RequestTypeGetSecret, RequestTypeSearch, RequestTypeDelete, RequestTypeWrite,
-		RequestTypeSSHSign, RequestTypeUnlock, RequestTypeGPGSign:
+		RequestTypeSSHSign, RequestTypeUnlock:
 		return true
 	default:
 		return false
@@ -406,6 +409,9 @@ func (m *Manager) checkSavedApprovalRules(senderInfo SenderInfo, items []ItemInf
 }
 
 func matchSavedApprovalRule(rule *SavedApprovalRule, senderInfo SenderInfo, items []ItemInfo, reqType RequestType, searchAttrs map[string]string) bool {
+	if reqType == RequestTypeGPGSign {
+		return false
+	}
 	trust := TrustRule{
 		RequestTypes:     rule.RequestTypes,
 		Process:          rule.Process,
@@ -461,7 +467,8 @@ func LogSavedApprovalRuleMatch(rule *SavedApprovalRule, senderInfo SenderInfo, i
 		"request_sender", senderInfo.Sender,
 		"request_pid", senderInfo.PID,
 		"request_uid", senderInfo.UID,
-		"request_invoker", senderInfo.UnitName,
+		"request_invoker", senderInfo.InvokerName,
+		"request_systemd_unit", senderInfo.SystemdUnit,
 		"request_process_chain", senderInfo.ProcessChain,
 		"request_collection", collection,
 		"request_label", label,
@@ -501,7 +508,7 @@ func savedApprovalRuleFromTemporary(rule AutoApproveRule) SavedApprovalRule {
 	saved := SavedApprovalRule{
 		Enabled:      true,
 		RequestTypes: []string{string(rule.RequestType)},
-		Process:      &ProcessMatcher{Unit: globQuote(rule.InvokerName)},
+		Process:      cloneProcessMatcher(rule.Process),
 	}
 	if rule.RequestType == RequestTypeSearch {
 		saved.SearchAttributes = quoteMap(rule.Attributes)
@@ -516,19 +523,21 @@ func savedApprovalRuleFromTemporary(rule AutoApproveRule) SavedApprovalRule {
 }
 
 func processMatcherFromSender(sender SenderInfo) *ProcessMatcher {
-	if sender.UnitName != "" {
-		return &ProcessMatcher{Unit: globQuote(sender.UnitName)}
-	}
 	if len(sender.ProcessChain) > 0 {
 		first := sender.ProcessChain[0]
 		if first.Exe != "" {
 			return &ProcessMatcher{Exe: globQuote(first.Exe)}
 		}
-		if first.Name != "" {
-			return &ProcessMatcher{Name: globQuote(first.Name)}
-		}
 	}
 	return nil
+}
+
+func cloneProcessMatcher(in *ProcessMatcher) *ProcessMatcher {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func defaultSavedRuleName(rule *SavedApprovalRule) string {

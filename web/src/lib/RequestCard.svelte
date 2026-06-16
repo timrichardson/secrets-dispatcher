@@ -73,6 +73,10 @@
     }
   }
 
+  function canSaveRule(): boolean {
+    return request.type !== "gpg_sign";
+  }
+
   async function copyToClipboard(path: string) {
     await navigator.clipboard.writeText(path);
     copiedPath = path;
@@ -376,18 +380,20 @@
         Approve similar
       {/if}
     </button>
-    <button
-      class="btn-save-rule"
-      onclick={handleSaveRule}
-      disabled={loading !== null}
-      title="Create a saved approval rule without resolving this request"
-    >
-      {#if loading === "save_rule"}
-        Saving rule...
-      {:else}
-        Save rule
-      {/if}
-    </button>
+    {#if canSaveRule()}
+      <button
+        class="btn-save-rule"
+        onclick={handleSaveRule}
+        disabled={loading !== null}
+        title="Create a saved approval rule without resolving this request"
+      >
+        {#if loading === "save_rule"}
+          Saving rule...
+        {:else}
+          Save rule
+        {/if}
+      </button>
+    {/if}
     <button class="btn-deny" onclick={handleDeny} disabled={loading !== null}>
       {#if loading === "deny"}
         Denying...
@@ -397,7 +403,7 @@
     </button>
   </div>
   <p class="action-help">
-    "Approve similar" also allows matching requests for {formatDurationShort(autoApproveDurationSeconds)}. "Save rule" makes a persistent rule without approving this request.
+    "Approve similar" also allows matching requests for {formatDurationShort(autoApproveDurationSeconds)}.{#if canSaveRule()} "Save rule" makes a persistent rule without approving this request.{/if}
   </p>
 </div>
 

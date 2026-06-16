@@ -169,6 +169,7 @@ type AutoApproveRule struct {
 	InvokerName string            `json:"invoker_name"`
 	InvokerExe  string            `json:"invoker_exe,omitempty"`
 	RequestType RequestType       `json:"request_type"`
+	Process     *ProcessMatcher   `json:"process,omitempty"`
 	Collection  string            `json:"collection"`
 	Attributes  map[string]string `json:"attributes,omitempty"`
 	ExpiresAt   time.Time         `json:"expires_at"`
@@ -409,7 +410,7 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 	}
 
 	// Check auto-approve rules (for timed-out client retries).
-	if rule := m.checkAutoApproveRules(senderInfo, items, reqType); rule != nil {
+	if rule := m.checkAutoApproveRules(senderInfo, items, reqType, searchAttrs); rule != nil {
 		slog.Info("auto-approve rule matched",
 			"rule_id", rule.ID,
 			"invoker", rule.InvokerName,
@@ -708,6 +709,7 @@ func (m *Manager) AddAutoApproveRule(req *Request) string {
 		InvokerName: req.SenderInfo.InvokerName,
 		InvokerExe:  invokerExePath(req.SenderInfo),
 		RequestType: req.Type,
+		Process:     processMatcherFromSender(req.SenderInfo),
 		ExpiresAt:   time.Now().Add(duration),
 	}
 
@@ -728,6 +730,7 @@ func (m *Manager) AddAutoApproveRule(req *Request) string {
 		existing := &m.autoApproveRules[i]
 		if existing.InvokerExe == rule.InvokerExe &&
 			existing.RequestType == rule.RequestType &&
+			processMatchersEqual(existing.Process, rule.Process) &&
 			existing.Collection == rule.Collection &&
 			attributesEqual(existing.Attributes, rule.Attributes) {
 			existing.ExpiresAt = rule.ExpiresAt
@@ -759,7 +762,7 @@ func (m *Manager) AddAutoApproveRule(req *Request) string {
 // flow and need to consult ephemeral auto-approve rules before opening a
 // notification. Same matching semantics as RequireApproval's auto-approve check.
 func (m *Manager) CheckAutoApproveRules(senderInfo SenderInfo, items []ItemInfo, reqType RequestType) *AutoApproveRule {
-	return m.checkAutoApproveRules(senderInfo, items, reqType)
+	return m.checkAutoApproveRules(senderInfo, items, reqType, nil)
 }
 
 // NewTemporaryDecisionAttribution returns history attribution for a temporary rule match.
@@ -878,7 +881,8 @@ func LogTrustRuleMatch(rule *TrustRule, senderInfo SenderInfo, items []ItemInfo,
 		"request_sender", senderInfo.Sender,
 		"request_pid", senderInfo.PID,
 		"request_uid", senderInfo.UID,
-		"request_invoker", senderInfo.UnitName,
+		"request_invoker", senderInfo.InvokerName,
+		"request_systemd_unit", senderInfo.SystemdUnit,
 		"request_process_chain", senderInfo.ProcessChain,
 		"request_collection", collection,
 		"request_label", label,
@@ -890,7 +894,7 @@ func LogTrustRuleMatch(rule *TrustRule, senderInfo SenderInfo, items []ItemInfo,
 
 // checkAutoApproveRules checks if the request matches any active auto-approve rule.
 // Returns the matching rule or nil.
-func (m *Manager) checkAutoApproveRules(senderInfo SenderInfo, items []ItemInfo, reqType RequestType) *AutoApproveRule {
+func (m *Manager) checkAutoApproveRules(senderInfo SenderInfo, items []ItemInfo, reqType RequestType, searchAttrs map[string]string) *AutoApproveRule {
 	m.autoApproveMu.Lock()
 	defer m.autoApproveMu.Unlock()
 
@@ -921,15 +925,13 @@ func (m *Manager) checkAutoApproveRules(senderInfo SenderInfo, items []ItemInfo,
 		if rule.RequestType != reqType {
 			continue
 		}
-		// Match collection + attributes for EVERY item in the batch. An
-		// auto-approve rule is permissive, so a single decision covers the whole
-		// batch only when every item falls within the rule's scope; matching just
-		// items[0] would let a batch smuggle an out-of-scope secret past a rule
-		// scoped to a benign collection.
-		if autoApproveCoversAll(rule, items) {
-			matched := *rule
-			match = &matched
+		// A permissive rule may authorize a batch only when every item is in scope.
+		if !autoApproveCoversAll(rule, items) {
+			continue
 		}
+
+		matched := *rule
+		match = &matched
 	}
 
 	m.autoApproveRules = active
@@ -971,6 +973,13 @@ func attributesEqual(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func processMatchersEqual(a, b *ProcessMatcher) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Exe == b.Exe && a.Name == b.Name && a.CWD == b.CWD && a.Unit == b.Unit
 }
 
 // attributesMatch returns true if all entries in ruleAttrs are present in reqAttrs.
@@ -1213,20 +1222,8 @@ func matchProcess(pm *ProcessMatcher, senderInfo SenderInfo) bool {
 }
 
 // matchSecret checks whether a batch of items matches the secret matcher.
-//
-// A single approval decision covers the whole batch, so every item must be
-// considered — never just items[0]. The quantifier depends on the rule's
-// polarity so that both directions fail closed:
-//
-//   - restrictive rules (deny/ignore) match if ANY item is in scope, so a deny
-//     scoped to a sensitive collection still fires when a batch smuggles that
-//     item alongside benign ones.
-//   - permissive rules (approve) match only if EVERY item is in scope, so an
-//     approve scoped to a low-value collection cannot silently authorize a batch
-//     that also pulls out-of-scope secrets.
-//
-// A matcher with no constraints matches any batch (including the empty batch);
-// a constrained matcher never matches an empty batch, since no item is in scope.
+// Restrictive deny/ignore rules match when any item is in scope; permissive
+// approve rules match only when every item is in scope.
 func matchSecret(sm *SecretMatcher, items []ItemInfo, restrictive bool) bool {
 	if sm.Collection == "" && sm.Label == "" && len(sm.Attributes) == 0 {
 		return true

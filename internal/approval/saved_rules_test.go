@@ -16,7 +16,14 @@ func savedRuleTestRequest(attrs map[string]string) *Request {
 			Label:      "GitHub token",
 			Attributes: attrs,
 		}},
-		SenderInfo: SenderInfo{UnitName: "gh"},
+		SenderInfo: savedRuleSender("/usr/bin/gh"),
+	}
+}
+
+func savedRuleSender(exe string) SenderInfo {
+	return SenderInfo{
+		UnitName:     "gh",
+		ProcessChain: []ProcessInfo{{Name: "gh", PID: 1, Exe: exe}},
 	}
 }
 
@@ -44,7 +51,7 @@ func TestSavedApprovalRule_PersistsAndMatchesAfterReload(t *testing.T) {
 		SavedRulesStore:    store,
 	})
 
-	autoApproved, err := reloaded.RequireApproval(context.Background(), "client", savedRuleTestRequest(map[string]string{"service": "github"}).Items, "", RequestTypeGetSecret, nil, SenderInfo{UnitName: "gh"})
+	autoApproved, err := reloaded.RequireApproval(context.Background(), "client", savedRuleTestRequest(map[string]string{"service": "github"}).Items, "", RequestTypeGetSecret, nil, savedRuleSender("/usr/bin/gh"))
 	if err != nil {
 		t.Fatalf("RequireApproval returned error: %v", err)
 	}
@@ -96,10 +103,10 @@ func TestSavedApprovalRule_EscapesLiteralGlobMetacharacters(t *testing.T) {
 		t.Fatalf("CreateSavedApprovalRuleFromRequest failed: %v", err)
 	}
 
-	if rule := mgr.CheckSavedApprovalRules(SenderInfo{UnitName: "gh"}, savedRuleTestRequest(map[string]string{"service": "gh[prod]*"}).Items, RequestTypeGetSecret, nil); rule == nil {
+	if rule := mgr.CheckSavedApprovalRules(savedRuleSender("/usr/bin/gh"), savedRuleTestRequest(map[string]string{"service": "gh[prod]*"}).Items, RequestTypeGetSecret, nil); rule == nil {
 		t.Fatal("expected exact literal value to match")
 	}
-	if rule := mgr.CheckSavedApprovalRules(SenderInfo{UnitName: "gh"}, savedRuleTestRequest(map[string]string{"service": "ghp"}).Items, RequestTypeGetSecret, nil); rule != nil {
+	if rule := mgr.CheckSavedApprovalRules(savedRuleSender("/usr/bin/gh"), savedRuleTestRequest(map[string]string{"service": "ghp"}).Items, RequestTypeGetSecret, nil); rule != nil {
 		t.Fatalf("unexpected wildcard match: %#v", rule)
 	}
 }
@@ -120,11 +127,74 @@ func TestSavedApprovalRule_DoesNotOverrideConfigDeny(t *testing.T) {
 		t.Fatalf("CreateSavedApprovalRuleFromRequest failed: %v", err)
 	}
 
-	autoApproved, err := mgr.RequireApproval(context.Background(), "client", savedRuleTestRequest(map[string]string{"service": "github"}).Items, "", RequestTypeGetSecret, nil, SenderInfo{UnitName: "gh"})
+	autoApproved, err := mgr.RequireApproval(context.Background(), "client", savedRuleTestRequest(map[string]string{"service": "github"}).Items, "", RequestTypeGetSecret, nil, savedRuleSender("/usr/bin/gh"))
 	if !errors.Is(err, ErrDeniedByRule) {
 		t.Fatalf("RequireApproval error = %v, want ErrDeniedByRule", err)
 	}
 	if !autoApproved {
 		t.Fatal("rule-denied request should be resolved without prompting")
+	}
+}
+
+func TestSavedApprovalRule_GeneratedRuleUsesExecutablePath(t *testing.T) {
+	mgr := NewManager(ManagerConfig{Timeout: 20 * time.Millisecond, HistoryMax: 10})
+	mgr.AddHistoryEntry(HistoryEntry{Request: savedRuleTestRequest(map[string]string{"service": "github"}), Resolution: ResolutionApproved})
+	rule, err := mgr.CreateSavedApprovalRuleFromRequest("req-1")
+	if err != nil {
+		t.Fatalf("CreateSavedApprovalRuleFromRequest failed: %v", err)
+	}
+	if rule.Process == nil || rule.Process.Exe != "/usr/bin/gh" || rule.Process.Unit != "" || rule.Process.Name != "" {
+		t.Fatalf("generated process matcher = %#v, want executable path only", rule.Process)
+	}
+	if matched := mgr.CheckSavedApprovalRules(savedRuleSender("/tmp/gh"), savedRuleTestRequest(map[string]string{"service": "github"}).Items, RequestTypeGetSecret, nil); matched != nil {
+		t.Fatalf("spoofed process name with different executable matched saved rule: %#v", matched)
+	}
+}
+
+func TestSavedApprovalRule_MultiItemRequiresEveryItemToMatch(t *testing.T) {
+	mgr := NewManager(ManagerConfig{Timeout: 20 * time.Millisecond, HistoryMax: 10})
+	mgr.AddHistoryEntry(HistoryEntry{Request: savedRuleTestRequest(map[string]string{"service": "github"}), Resolution: ResolutionApproved})
+	if _, err := mgr.CreateSavedApprovalRuleFromRequest("req-1"); err != nil {
+		t.Fatalf("CreateSavedApprovalRuleFromRequest failed: %v", err)
+	}
+
+	items := []ItemInfo{
+		{Path: "/org/freedesktop/secrets/collection/login/item1", Attributes: map[string]string{"service": "github"}},
+		{Path: "/org/freedesktop/secrets/collection/login/item2", Attributes: map[string]string{"service": "bank"}},
+	}
+	if rule := mgr.CheckSavedApprovalRules(savedRuleSender("/usr/bin/gh"), items, RequestTypeGetSecret, nil); rule != nil {
+		t.Fatalf("mixed multi-item request matched saved approval rule: %#v", rule)
+	}
+}
+
+func TestSavedApprovalRule_GPGSignUnsupported(t *testing.T) {
+	mgr := NewManager(ManagerConfig{Timeout: 20 * time.Millisecond, HistoryMax: 10})
+	_, err := mgr.CreateSavedApprovalRule(SavedApprovalRule{
+		RequestTypes: []string{string(RequestTypeGPGSign)},
+		Process:      &ProcessMatcher{Exe: "/usr/bin/git"},
+	})
+	if !errors.Is(err, ErrInvalidRule) {
+		t.Fatalf("CreateSavedApprovalRule error = %v, want ErrInvalidRule", err)
+	}
+
+	mgr.AddHistoryEntry(HistoryEntry{Request: &Request{
+		ID:          "gpg-1",
+		Type:        RequestTypeGPGSign,
+		GPGSignInfo: sampleGPGSignInfo(),
+		SenderInfo:  savedRuleSender("/usr/bin/git"),
+	}, Resolution: ResolutionApproved})
+	_, err = mgr.CreateSavedApprovalRuleFromRequest("gpg-1")
+	if !errors.Is(err, ErrInvalidRule) {
+		t.Fatalf("CreateSavedApprovalRuleFromRequest error = %v, want ErrInvalidRule", err)
+	}
+
+	legacy := NewManager(ManagerConfig{SavedApprovalRules: []SavedApprovalRule{{
+		ID:           "legacy-gpg",
+		Enabled:      true,
+		RequestTypes: []string{string(RequestTypeGPGSign)},
+		Process:      &ProcessMatcher{Exe: "/usr/bin/git"},
+	}}})
+	if rule := legacy.CheckSavedApprovalRules(savedRuleSender("/usr/bin/git"), nil, RequestTypeGPGSign, nil); rule != nil {
+		t.Fatalf("legacy gpg_sign saved rule matched: %#v", rule)
 	}
 }
