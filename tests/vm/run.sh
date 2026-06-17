@@ -4,24 +4,63 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 
-SCENARIO=${SCENARIO:-secure-local}
-DESKTOP_USER=${DESKTOP_USER:-sdtest}
+DISTRO=${1:-${DISTRO:-ubuntu}}
+MODE=${MODE:-local}
+BACKEND=${BACKEND:-gnome-keyring}
+SCENARIO=${SCENARIO:-$MODE}
 GNOME_PROFILE=${GNOME_PROFILE:-desktop}
-VM_NAME=${VM_NAME:-secrets-dispatcher-ubuntu-${SCENARIO}}
+DESKTOP_USER=${DESKTOP_USER:-sdtest}
+VM_NAME=${VM_NAME:-secrets-dispatcher-${DISTRO}-${SCENARIO}-${BACKEND}}
 VM_DIR=${VM_DIR:-$ROOT_DIR/.vm/$VM_NAME}
 VM_IMAGE_CACHE=${VM_IMAGE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/secrets-dispatcher/vm-images}
 BINARY=${BINARY:-$ROOT_DIR/secrets-dispatcher}
 KEEP_VM=${KEEP_VM:-0}
+GOPASS_SOURCE=${GOPASS_SOURCE:-github.com/gopasspw/gopass@latest}
+GOPASS_SECRET_SERVICE_SOURCE=${GOPASS_SECRET_SERVICE_SOURCE:-github.com/nikicat/gopass-secret-service/cmd/gopass-secret@latest}
+GOPASS_SECRET_SERVICE_BIN=${GOPASS_SECRET_SERVICE_BIN:-/usr/local/bin/gopass-secret-service}
 
 UBUNTU_RELEASE=${UBUNTU_RELEASE:-26.04}
 UBUNTU_CODENAME=${UBUNTU_CODENAME:-resolute}
 UBUNTU_IMAGE_URL=${UBUNTU_IMAGE_URL:-https://cloud-images.ubuntu.com/releases/${UBUNTU_RELEASE}/release/ubuntu-${UBUNTU_RELEASE}-server-cloudimg-amd64.img}
-IMAGE_NAME=ubuntu-${UBUNTU_RELEASE}-${UBUNTU_CODENAME}-server-cloudimg-amd64.img
+FEDORA_RELEASE=${FEDORA_RELEASE:-44}
+FEDORA_IMAGE_URL=${FEDORA_IMAGE_URL:-https://download.fedoraproject.org/pub/fedora/linux/releases/${FEDORA_RELEASE}/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-${FEDORA_RELEASE}-1.7.x86_64.qcow2}
 
 case "$SCENARIO" in
-normal|secure-local) ;;
+normal) SCENARIO=local ;;
+secure-local) SCENARIO=secure-local-user ;;
+local|full|secure-local-user) ;;
 *)
-	echo "unsupported SCENARIO=$SCENARIO (want normal or secure-local)" >&2
+	echo "unsupported SCENARIO=$SCENARIO (want local, full, or secure-local-user)" >&2
+	exit 2
+	;;
+esac
+
+case "$BACKEND" in
+gnome-keyring|gopass) ;;
+*)
+	echo "unsupported BACKEND=$BACKEND (want gnome-keyring or gopass)" >&2
+	exit 2
+	;;
+esac
+
+if [ "$SCENARIO" = secure-local-user ] && [ "$BACKEND" != gnome-keyring ]; then
+	echo "secure-local-user currently supports BACKEND=gnome-keyring only" >&2
+	exit 2
+fi
+
+case "$DISTRO" in
+ubuntu)
+	IMAGE_URL=$UBUNTU_IMAGE_URL
+	IMAGE_NAME=ubuntu-${UBUNTU_RELEASE}-${UBUNTU_CODENAME}-server-cloudimg-amd64.img
+	OS_VARIANT=generic
+	;;
+fedora)
+	IMAGE_URL=$FEDORA_IMAGE_URL
+	IMAGE_NAME=fedora-${FEDORA_RELEASE}-cloud-base-generic.x86_64.qcow2
+	OS_VARIANT=generic
+	;;
+*)
+	echo "unsupported DISTRO=$DISTRO (want ubuntu or fedora)" >&2
 	exit 2
 	;;
 esac
@@ -33,6 +72,21 @@ missing_commands() {
 			printf '%s\n' "$cmd"
 		fi
 	done
+}
+
+host_package_list() {
+	local host_id=${1:-}
+	case "$host_id" in
+	ubuntu|debian)
+		printf '%s\n' curl qemu-utils openssh-client libvirt-clients virtinst genisoimage
+		;;
+	fedora)
+		printf '%s\n' curl qemu-img openssh-clients libvirt-client virt-install genisoimage
+		;;
+	*)
+		return 1
+		;;
+	esac
 }
 
 try_install_host_deps() {
@@ -51,7 +105,8 @@ try_install_host_deps() {
 	fi
 	case "$host_id" in
 	ubuntu|debian)
-		local packages="curl qemu-utils openssh-client libvirt-clients virtinst genisoimage"
+		local packages
+		packages=$(host_package_list "$host_id" | tr '\n' ' ')
 		echo "missing host commands: $missing"
 		echo "trying to install host VM dependencies with apt: $packages"
 		if sudo -n true 2>/dev/null; then
@@ -63,7 +118,8 @@ try_install_host_deps() {
 		fi
 		;;
 	fedora)
-		local packages="curl qemu-img openssh-clients libvirt-client virt-install genisoimage"
+		local packages
+		packages=$(host_package_list "$host_id" | tr '\n' ' ')
 		echo "missing host commands: $missing"
 		echo "trying to install host VM dependencies with dnf: $packages"
 		if sudo -n true 2>/dev/null; then
@@ -75,7 +131,7 @@ try_install_host_deps() {
 		;;
 	*)
 		echo "missing required host commands: $missing" >&2
-		echo "install libvirt, virt-install, qemu-img, OpenSSH client tools, curl, and genisoimage manually" >&2
+		echo "unsupported host distro for auto-install; install libvirt, virt-install, qemu-img, OpenSSH client tools, curl, and genisoimage manually" >&2
 		return 1
 		;;
 	esac
@@ -96,8 +152,10 @@ elif command -v genisoimage >/dev/null 2>&1; then
 	SEED_ISO_TOOL=genisoimage
 elif command -v mkisofs >/dev/null 2>&1; then
 	SEED_ISO_TOOL=mkisofs
+elif command -v xorriso >/dev/null 2>&1; then
+	SEED_ISO_TOOL=xorriso
 else
-	echo "missing seed ISO tool: install cloud-image-utils or provide genisoimage/mkisofs" >&2
+	echo "missing seed ISO tool: install cloud-image-utils or provide genisoimage/mkisofs/xorriso" >&2
 	exit 127
 fi
 
@@ -117,8 +175,8 @@ SSH_PUB=$(<"$SSH_KEY.pub")
 
 BASE_IMAGE=$VM_IMAGE_CACHE/$IMAGE_NAME
 if [ ! -f "$BASE_IMAGE" ]; then
-	echo "downloading $UBUNTU_IMAGE_URL"
-	curl -fL --retry 3 --output "$BASE_IMAGE.partial" "$UBUNTU_IMAGE_URL"
+	echo "downloading $IMAGE_URL"
+	curl -fL --retry 3 --output "$BASE_IMAGE.partial" "$IMAGE_URL"
 	mv "$BASE_IMAGE.partial" "$BASE_IMAGE"
 fi
 
@@ -132,7 +190,7 @@ cat >"$USER_DATA" <<EOF_USER_DATA
 users:
   - name: tester
     gecos: VM Test User
-    groups: [adm, sudo]
+    groups: [adm, wheel, sudo]
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
     lock_passwd: true
@@ -176,12 +234,15 @@ cloud-localds)
 genisoimage|mkisofs)
 	"$SEED_ISO_TOOL" -quiet -output "$SEED" -volid cidata -joliet -rock "$USER_DATA" "$META_DATA"
 	;;
+xorriso)
+	xorriso -as mkisofs -quiet -output "$SEED" -volid cidata -joliet -rock "$USER_DATA" "$META_DATA"
+	;;
 esac
 
 virsh net-start default >/dev/null 2>&1 || true
 virsh net-autostart default >/dev/null 2>&1 || true
 
-echo "starting VM $VM_NAME (ubuntu, scenario=$SCENARIO, gnome_profile=$GNOME_PROFILE)"
+echo "starting VM $VM_NAME ($DISTRO, scenario=$SCENARIO, backend=$BACKEND, gnome_profile=$GNOME_PROFILE)"
 virt-install \
 	--name "$VM_NAME" \
 	--memory 4096 \
@@ -192,7 +253,7 @@ virt-install \
 	--network network=default,model=virtio \
 	--graphics none \
 	--noautoconsole \
-	--os-variant generic
+	--os-variant "$OS_VARIANT"
 
 vm_ip() {
 	virsh domifaddr "$VM_NAME" --source lease 2>/dev/null | awk '/ipv4/ { sub("/.*", "", $4); print $4; exit }'
@@ -238,6 +299,6 @@ ssh "${SSH_OPTS[@]}" "tester@$IP" \
 
 echo "running guest smoke test"
 ssh "${SSH_OPTS[@]}" "tester@$IP" \
-	"sudo env SCENARIO='$SCENARIO' DESKTOP_USER='$DESKTOP_USER' GNOME_PROFILE='$GNOME_PROFILE' /tmp/guest-smoke.sh"
+	"sudo env DISTRO='$DISTRO' SCENARIO='$SCENARIO' MODE='$MODE' BACKEND='$BACKEND' GNOME_PROFILE='$GNOME_PROFILE' DESKTOP_USER='$DESKTOP_USER' GOPASS_SOURCE='$GOPASS_SOURCE' GOPASS_SECRET_SERVICE_SOURCE='$GOPASS_SECRET_SERVICE_SOURCE' GOPASS_SECRET_SERVICE_BIN='$GOPASS_SECRET_SERVICE_BIN' /tmp/guest-smoke.sh"
 
-echo "VM smoke test passed: scenario=$SCENARIO"
+echo "VM smoke test passed: distro=$DISTRO scenario=$SCENARIO backend=$BACKEND"

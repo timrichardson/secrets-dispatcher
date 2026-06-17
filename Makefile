@@ -1,7 +1,9 @@
 MAKEFLAGS += -j
 
 .PHONY: all build frontend backend backend-dev install clean test test-go test-e2e test-e2e-all test-e2e-browser \
-	vm-test vm-test-ubuntu vm-test-ubuntu-normal vm-test-ubuntu-secure-local \
+	vm-test vm-test-all vm-test-ubuntu vm-test-fedora vm-test-ubuntu-normal \
+	vm-test-ubuntu-gnome vm-test-fedora-gnome vm-test-ubuntu-gopass vm-test-fedora-gopass \
+	vm-test-ubuntu-secure-local vm-test-ubuntu-secure-local-user vm-test-fedora-secure-local-user \
 	playwright-install dev version pre-commit screenshots \
 	check check-go check-go-fmt check-go-vet check-go-staticcheck check-frontend check-frontend-fmt check-frontend-lint \
 	fmt fmt-go fmt-frontend
@@ -37,16 +39,42 @@ backend-dev: frontend
 # Full build
 build: backend
 
-# Host-driven libvirt/QEMU Ubuntu VM smoke tests.
-vm-test: vm-test-ubuntu
+# Host-driven libvirt/QEMU VM smoke tests.
+vm-test: vm-test-ubuntu-gnome
 
-vm-test-ubuntu: vm-test-ubuntu-secure-local
+vm-test-all: backend
+	DISTRO=ubuntu SCENARIO=local BACKEND=gnome-keyring tests/vm/run.sh
+	DISTRO=fedora SCENARIO=local BACKEND=gnome-keyring tests/vm/run.sh
+	DISTRO=ubuntu SCENARIO=local BACKEND=gopass tests/vm/run.sh
+	DISTRO=fedora SCENARIO=local BACKEND=gopass tests/vm/run.sh
+	DISTRO=ubuntu SCENARIO=secure-local-user BACKEND=gnome-keyring tests/vm/run.sh
+	DISTRO=fedora SCENARIO=secure-local-user BACKEND=gnome-keyring tests/vm/run.sh
 
-vm-test-ubuntu-normal: backend
-	SCENARIO=normal tests/vm/run.sh
+vm-test-ubuntu: vm-test-ubuntu-gnome
 
-vm-test-ubuntu-secure-local: backend
-	SCENARIO=secure-local tests/vm/run.sh
+vm-test-fedora: vm-test-fedora-gnome
+
+vm-test-ubuntu-normal: vm-test-ubuntu-gnome
+
+vm-test-ubuntu-gnome: backend
+	DISTRO=ubuntu SCENARIO=local BACKEND=gnome-keyring tests/vm/run.sh
+
+vm-test-fedora-gnome: backend
+	DISTRO=fedora SCENARIO=local BACKEND=gnome-keyring tests/vm/run.sh
+
+vm-test-ubuntu-gopass: backend
+	DISTRO=ubuntu SCENARIO=local BACKEND=gopass tests/vm/run.sh
+
+vm-test-fedora-gopass: backend
+	DISTRO=fedora SCENARIO=local BACKEND=gopass tests/vm/run.sh
+
+vm-test-ubuntu-secure-local: vm-test-ubuntu-secure-local-user
+
+vm-test-ubuntu-secure-local-user: backend
+	DISTRO=ubuntu SCENARIO=secure-local-user BACKEND=gnome-keyring tests/vm/run.sh
+
+vm-test-fedora-secure-local-user: backend
+	DISTRO=fedora SCENARIO=secure-local-user BACKEND=gnome-keyring tests/vm/run.sh
 
 # Install the built binary to the user-local bin directory.
 BINDIR ?= $(HOME)/.local/bin
