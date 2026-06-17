@@ -1,6 +1,6 @@
 MAKEFLAGS += -j
 
-.PHONY: all build frontend backend backend-dev clean test test-go test-e2e test-e2e-all test-e2e-browser \
+.PHONY: all build frontend backend backend-dev install clean test test-go test-e2e test-e2e-all test-e2e-browser \
 	vm-test vm-test-ubuntu vm-test-ubuntu-normal vm-test-ubuntu-secure-local \
 	playwright-install dev version pre-commit screenshots \
 	check check-go check-go-fmt check-go-vet check-go-staticcheck check-frontend check-frontend-fmt check-frontend-lint \
@@ -47,6 +47,12 @@ vm-test-ubuntu-normal: backend
 
 vm-test-ubuntu-secure-local: backend
 	SCENARIO=secure-local tests/vm/run.sh
+
+# Install the built binary to the user-local bin directory.
+BINDIR ?= $(HOME)/.local/bin
+install: build
+	install -d "$(BINDIR)"
+	install -m 0755 secrets-dispatcher "$(BINDIR)/secrets-dispatcher"
 
 # Run frontend dev server (with API proxy to localhost:8484)
 dev:
