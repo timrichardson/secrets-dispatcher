@@ -90,8 +90,8 @@ func (i *ItemHandler) Delete(msg dbus.Message) (dbus.ObjectPath, *dbus.Error) {
 	itemInfo := i.getItemInfo(path, senderCtx)
 
 	// Get a context that will be cancelled if the client disconnects
-	ctx := i.tracker.contextForSender(context.Background(), sender)
-	defer i.tracker.remove(sender)
+	ctx, release := i.tracker.contextForSender(context.Background(), sender)
+	defer release()
 
 	// Resolve sender information
 	senderInfo := i.resolver.Resolve(sender)
@@ -142,8 +142,8 @@ func (i *ItemHandler) GetSecret(msg dbus.Message, session dbus.ObjectPath) (dbus
 	itemInfo := i.getItemInfo(path, senderCtx)
 
 	// Get a context that will be cancelled if the client disconnects
-	ctx := i.tracker.contextForSender(context.Background(), sender)
-	defer i.tracker.remove(sender)
+	ctx, release := i.tracker.contextForSender(context.Background(), sender)
+	defer release()
 
 	// Resolve sender information
 	senderInfo := i.resolver.Resolve(sender)
@@ -207,8 +207,8 @@ func (i *ItemHandler) SetSecret(msg dbus.Message, secret dbustypes.Secret) *dbus
 	itemInfo := i.getItemInfo(path, senderCtx)
 
 	// Get a context that will be cancelled if the client disconnects
-	ctx := i.tracker.contextForSender(context.Background(), sender)
-	defer i.tracker.remove(sender)
+	ctx, release := i.tracker.contextForSender(context.Background(), sender)
+	defer release()
 
 	// Resolve sender information
 	senderInfo := i.resolver.Resolve(sender)

@@ -95,8 +95,8 @@ func (c *CollectionHandler) Delete(msg dbus.Message) (dbus.ObjectPath, *dbus.Err
 	collectionInfo := c.getCollectionInfo(path, senderCtx)
 
 	// Get a context that will be cancelled if the client disconnects
-	ctx := c.tracker.contextForSender(context.Background(), sender)
-	defer c.tracker.remove(sender)
+	ctx, release := c.tracker.contextForSender(context.Background(), sender)
+	defer release()
 
 	// Resolve sender information
 	senderInfo := c.resolver.Resolve(sender)
@@ -221,8 +221,8 @@ func (c *CollectionHandler) CreateItem(msg dbus.Message, properties map[string]d
 
 	// Get a context that will be cancelled if the client disconnects
 	sender := msg.Headers[dbus.FieldSender].Value().(string)
-	ctx := c.tracker.contextForSender(context.Background(), sender)
-	defer c.tracker.remove(sender)
+	ctx, release := c.tracker.contextForSender(context.Background(), sender)
+	defer release()
 
 	// Resolve sender information
 	senderInfo := c.resolver.Resolve(sender)
