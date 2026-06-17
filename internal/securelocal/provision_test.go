@@ -134,6 +134,7 @@ func TestProvisionSecureLocalDirs(t *testing.T) {
 		filepath.Join("/var/lib/secret-companion", "tim", ".local", "share"),
 		filepath.Join("/var/lib/secret-companion", "tim", ".local", "share", "keyrings"),
 		DefaultSecureConfigBase,
+		DefaultSecureRuntimeBase,
 		DefaultSecureStateBase,
 		filepath.Join(DefaultSecureStateBase, "tim"),
 	}

@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/godbus/dbus/v5"
 	"github.com/nikicat/secrets-dispatcher/internal/api"
 	"github.com/nikicat/secrets-dispatcher/internal/approval"
 	"github.com/nikicat/secrets-dispatcher/internal/config"
@@ -17,8 +16,9 @@ import (
 )
 
 const (
-	DefaultSecureConfigBase = "/etc/secrets-dispatcher/secure"
-	DefaultSecureStateBase  = "/var/lib/secrets-dispatcher/secure"
+	DefaultSecureConfigBase  = "/etc/secrets-dispatcher/secure"
+	DefaultSecureRuntimeBase = "/run/secrets-dispatcher"
+	DefaultSecureStateBase   = "/var/lib/secrets-dispatcher/secure"
 )
 
 type brokerClientProvider struct{}
@@ -38,7 +38,7 @@ func (c LaunchConfig) secureStateDir() string {
 	return filepath.Join(DefaultSecureStateBase, c.DesktopUser)
 }
 
-func runBroker(ctx context.Context, cfg LaunchConfig, desktop *user.User, backendBusAddress string) error {
+func runBroker(ctx context.Context, cfg LaunchConfig, desktop, backend *user.User, backendBusPath string) error {
 	trustedCfg, err := config.Load(cfg.secureConfigPath())
 	if err != nil {
 		return fmt.Errorf("load secure-local trusted config: %w", err)
@@ -64,11 +64,11 @@ func runBroker(ctx context.Context, cfg LaunchConfig, desktop *user.User, backen
 		return fmt.Errorf("create secure-local API auth: %w", err)
 	}
 
-	frontConn, err := dbus.Connect("unix:path=/run/user/" + desktop.Uid + "/bus")
+	frontConn, err := connectDesktopSessionBus(desktop)
 	if err != nil {
 		return fmt.Errorf("connect desktop session bus: %w", err)
 	}
-	backendConn, err := dbus.Connect(backendBusAddress)
+	backendConn, err := connectPrivateBackendBus(backend, backendBusPath)
 	if err != nil {
 		frontConn.Close()
 		return fmt.Errorf("connect private backend bus: %w", err)

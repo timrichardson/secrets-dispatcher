@@ -1,6 +1,7 @@
 MAKEFLAGS += -j
 
 .PHONY: all build frontend backend backend-dev clean test test-go test-e2e test-e2e-all test-e2e-browser \
+	vm-test vm-test-ubuntu vm-test-ubuntu-normal vm-test-ubuntu-secure-local \
 	playwright-install dev version pre-commit screenshots \
 	check check-go check-go-fmt check-go-vet check-go-staticcheck check-frontend check-frontend-fmt check-frontend-lint \
 	fmt fmt-go fmt-frontend
@@ -35,6 +36,17 @@ backend-dev: frontend
 
 # Full build
 build: backend
+
+# Host-driven libvirt/QEMU Ubuntu VM smoke tests.
+vm-test: vm-test-ubuntu
+
+vm-test-ubuntu: vm-test-ubuntu-secure-local
+
+vm-test-ubuntu-normal: backend
+	SCENARIO=normal tests/vm/run.sh
+
+vm-test-ubuntu-secure-local: backend
+	SCENARIO=secure-local tests/vm/run.sh
 
 # Run frontend dev server (with API proxy to localhost:8484)
 dev:

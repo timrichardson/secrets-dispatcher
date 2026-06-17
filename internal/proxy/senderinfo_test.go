@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 
@@ -9,6 +10,18 @@ import (
 	"github.com/nikicat/secrets-dispatcher/internal/procutil"
 	"github.com/stretchr/testify/assert"
 )
+
+func unusedTestPID(t *testing.T) uint32 {
+	t.Helper()
+
+	for pid := uint32(4194303); pid > 1000000; pid-- {
+		if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); os.IsNotExist(err) {
+			return pid
+		}
+	}
+	t.Fatal("could not find unused test PID")
+	return 0
+}
 
 // mockDBusClient implements dbusClient for testing.
 type mockDBusClient struct {
@@ -33,8 +46,9 @@ func (m *mockDBusClient) GetUnitByPID(pid uint32) (string, error) {
 }
 
 func TestSenderInfoResolver_Resolve_AllSuccess(t *testing.T) {
+	pid := unusedTestPID(t)
 	client := &mockDBusClient{
-		pid:      12345,
+		pid:      pid,
 		uid:      1000,
 		unitName: "test.service",
 	}
@@ -45,8 +59,8 @@ func TestSenderInfoResolver_Resolve_AllSuccess(t *testing.T) {
 	if info.Sender != ":1.123" {
 		t.Errorf("expected sender :1.123, got %s", info.Sender)
 	}
-	if info.PID != 12345 {
-		t.Errorf("expected PID 12345, got %d", info.PID)
+	if info.PID != pid {
+		t.Errorf("expected PID %d, got %d", pid, info.PID)
 	}
 	if info.UID != 1000 {
 		t.Errorf("expected UID 1000, got %d", info.UID)
@@ -58,10 +72,11 @@ func TestSenderInfoResolver_Resolve_AllSuccess(t *testing.T) {
 
 func TestSenderInfoResolver_Resolve_NoSystemd(t *testing.T) {
 	// Simulates remote host without systemd or process not in a unit
+	pid := unusedTestPID(t)
 	client := &mockDBusClient{
-		pid:     12345,
+		pid:     pid,
 		uid:     1000,
-		unitErr: errors.New("PID 12345 does not belong to any loaded unit"),
+		unitErr: fmt.Errorf("PID %d does not belong to any loaded unit", pid),
 	}
 	resolver := newSenderInfoResolverWithClient(client)
 
@@ -70,8 +85,8 @@ func TestSenderInfoResolver_Resolve_NoSystemd(t *testing.T) {
 	if info.Sender != ":1.123" {
 		t.Errorf("expected sender :1.123, got %s", info.Sender)
 	}
-	if info.PID != 12345 {
-		t.Errorf("expected PID 12345, got %d", info.PID)
+	if info.PID != pid {
+		t.Errorf("expected PID %d, got %d", pid, info.PID)
 	}
 	if info.UID != 1000 {
 		t.Errorf("expected UID 1000, got %d", info.UID)
@@ -106,8 +121,9 @@ func TestSenderInfoResolver_Resolve_PIDFails(t *testing.T) {
 }
 
 func TestSenderInfoResolver_Resolve_UIDFails(t *testing.T) {
+	pid := unusedTestPID(t)
 	client := &mockDBusClient{
-		pid:      12345,
+		pid:      pid,
 		uidErr:   errors.New("connection not found"),
 		unitName: "test.service",
 	}
@@ -115,8 +131,8 @@ func TestSenderInfoResolver_Resolve_UIDFails(t *testing.T) {
 
 	info := resolver.Resolve(":1.123")
 
-	if info.PID != 12345 {
-		t.Errorf("expected PID 12345, got %d", info.PID)
+	if info.PID != pid {
+		t.Errorf("expected PID %d, got %d", pid, info.PID)
 	}
 	if info.UID != 0 {
 		t.Errorf("expected UID 0, got %d", info.UID)
@@ -254,10 +270,11 @@ func TestSenderInfoResolver_Resolve_FiltersSelfExe(t *testing.T) {
 }
 
 func TestSenderInfoResolver_Resolve_FallbackToSystemd(t *testing.T) {
-	// PID 12345 likely doesn't exist in /proc, so procutil returns empty
+	// Use a PID that doesn't exist in /proc, so procutil returns empty
 	// and we fall back to systemd GetUnitByPID.
+	pid := unusedTestPID(t)
 	client := &mockDBusClient{
-		pid:      12345,
+		pid:      pid,
 		uid:      1000,
 		unitName: "fallback.service",
 	}
@@ -269,7 +286,7 @@ func TestSenderInfoResolver_Resolve_FallbackToSystemd(t *testing.T) {
 		t.Errorf("expected InvokerName %q from systemd fallback, got %q", "fallback.service", info.InvokerName)
 	}
 	// PID should remain as the original D-Bus PID when procutil fails.
-	if info.PID != 12345 {
-		t.Errorf("expected PID 12345, got %d", info.PID)
+	if info.PID != pid {
+		t.Errorf("expected PID %d, got %d", pid, info.PID)
 	}
 }

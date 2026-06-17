@@ -99,6 +99,9 @@ func Provision(cfg ProvisionConfig) error {
 	if err := ensureRootDir(DefaultSecureConfigBase, 0755); err != nil {
 		return err
 	}
+	if err := ensureRootDir(DefaultSecureRuntimeBase, 0711); err != nil {
+		return err
+	}
 	if err := ensureRootDir(DefaultSecureStateBase, 0755); err != nil {
 		return err
 	}
@@ -262,7 +265,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/run/secrets-dispatcher {{.HomeBase}} {{.StateBase}}
+ReadWritePaths=` + DefaultSecureRuntimeBase + ` {{.HomeBase}} {{.StateBase}}
 
 [Install]
 WantedBy=multi-user.target

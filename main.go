@@ -73,6 +73,8 @@ func main() {
 		runProvision(os.Args[2:])
 	case "secure-launch":
 		runSecureLaunch(os.Args[2:])
+	case securelocal.BusFDHelperCommand:
+		runBusFDHelper(os.Args[2:])
 	case "daemon":
 		runDaemon(os.Args[2:])
 	case "version":
@@ -1088,6 +1090,17 @@ func runSecureLaunch(args []string) {
 		DBusDaemonPath: *dbusDaemon,
 	}
 	if err := securelocal.RunLauncher(ctx, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runBusFDHelper(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintf(os.Stderr, "error: bus path is required\n")
+		os.Exit(2)
+	}
+	if err := securelocal.RunBusFDHelper(args[0]); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}

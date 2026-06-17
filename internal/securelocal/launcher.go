@@ -47,7 +47,7 @@ func (c LaunchConfig) backendHome() string {
 }
 
 func (c LaunchConfig) runtimeDir() string {
-	return filepath.Join("/run", "secrets-dispatcher", c.DesktopUser)
+	return filepath.Join(DefaultSecureRuntimeBase, c.DesktopUser)
 }
 
 func (c LaunchConfig) backendBusPath() string {
@@ -135,7 +135,7 @@ func RunLauncher(ctx context.Context, cfg LaunchConfig) error {
 	children = append(children, &childProcess{name: provider.Name(), cmd: providerCmd})
 
 	return waitForBrokerOrChild(ctx, children, func(ctx context.Context) error {
-		return runBroker(ctx, cfg, desktop, busAddress)
+		return runBroker(ctx, cfg, desktop, backend, cfg.backendBusPath())
 	})
 }
 
