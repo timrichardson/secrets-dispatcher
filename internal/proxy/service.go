@@ -187,8 +187,8 @@ func (s *Service) Unlock(msg dbus.Message, objects []dbus.ObjectPath) ([]dbus.Ob
 		ResolveSender: func() approval.SenderInfo { return s.resolver.Resolve(sender) },
 	}
 	infos := s.getUnlockInfo(objects, senderCtx)
-	reqCtx := s.tracker.contextForSender(context.Background(), sender)
-	defer s.tracker.remove(sender)
+	reqCtx, release := s.tracker.contextForSender(context.Background(), sender)
+	defer release()
 	senderInfo := s.resolver.Resolve(sender)
 
 	// Check if request should be denied by a trust rule before prompting.
@@ -276,8 +276,8 @@ func (s *Service) ReadAlias(msg dbus.Message, name string) (dbus.ObjectPath, *db
 func (s *Service) SetAlias(msg dbus.Message, name string, collection dbus.ObjectPath) *dbus.Error {
 	obj := s.localConn.Object(dbustypes.BusName, dbustypes.ServicePath)
 	sender := msg.Headers[dbus.FieldSender].Value().(string)
-	reqCtx := s.tracker.contextForSender(context.Background(), sender)
-	defer s.tracker.remove(sender)
+	reqCtx, release := s.tracker.contextForSender(context.Background(), sender)
+	defer release()
 	senderInfo := s.resolver.Resolve(sender)
 	items := []approval.ItemInfo{aliasWriteInfo(name, collection)}
 	if _, err := s.approval.RequireApproval(reqCtx, s.clientName, items, "", approval.RequestTypeWrite, nil, senderInfo); err != nil {
@@ -300,8 +300,8 @@ func (s *Service) SetAlias(msg dbus.Message, name string, collection dbus.Object
 func (s *Service) CreateCollection(msg dbus.Message, properties map[string]dbus.Variant, alias string) (dbus.ObjectPath, dbus.ObjectPath, *dbus.Error) {
 	obj := s.localConn.Object(dbustypes.BusName, dbustypes.ServicePath)
 	sender := msg.Headers[dbus.FieldSender].Value().(string)
-	reqCtx := s.tracker.contextForSender(context.Background(), sender)
-	defer s.tracker.remove(sender)
+	reqCtx, release := s.tracker.contextForSender(context.Background(), sender)
+	defer release()
 	senderInfo := s.resolver.Resolve(sender)
 	items := []approval.ItemInfo{createCollectionInfo(properties, alias)}
 	if _, err := s.approval.RequireApproval(reqCtx, s.clientName, items, "", approval.RequestTypeWrite, nil, senderInfo); err != nil {
