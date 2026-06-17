@@ -707,8 +707,11 @@ func connectUpstream(upstream config.BusConfig, upstreamAddr string) (*dbus.Conn
 	switch upstream.Type {
 	case "session_bus":
 		return dbus.ConnectSessionBus()
-	case "socket":
+	case "socket", "managed":
 		if upstreamAddr == "" {
+			if upstream.Type == "managed" {
+				return nil, fmt.Errorf("managed upstream address is not available")
+			}
 			upstreamAddr = "unix:path=" + upstream.Path
 		}
 		return dbus.Connect(upstreamAddr)
