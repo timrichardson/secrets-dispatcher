@@ -166,6 +166,23 @@ secret_service_owner_pid() {
 	printf '%s\n' "$out" | awk '{ print $2 }'
 }
 
+secret_service_owner_name() {
+	local out
+	out=$(run_as_desktop busctl --user --timeout=5 call \
+		org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetNameOwner \
+		s org.freedesktop.secrets)
+	printf '%s\n' "$out" | awk '{ gsub(/"/, "", $2); print $2 }'
+}
+
+secret_service_owner_user() {
+	local owner out
+	owner=$(secret_service_owner_name)
+	out=$(run_as_desktop busctl --user --timeout=5 call \
+		org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixUser \
+		s "$owner")
+	printf '%s\n' "$out" | awk '{ print $2 }'
+}
+
 wait_for_secret_service_owner() {
 	for _ in $(seq 1 60); do
 		if secret_service_has_owner; then
@@ -193,6 +210,22 @@ assert_secret_service_owned_by_dispatcher() {
 		log "unexpected org.freedesktop.secrets owner: pid=$pid exe=$owner_exe expected=$expected_exe"
 		return 1
 	fi
+}
+
+assert_secret_service_owned_by_desktop_user() {
+	local owner_uid uid
+	owner_uid=$(secret_service_owner_user)
+	uid=$(desktop_uid)
+	if [ "$owner_uid" != "$uid" ]; then
+		log "unexpected org.freedesktop.secrets owner UID: $owner_uid expected=$uid"
+		return 1
+	fi
+}
+
+assert_secret_service_responds() {
+	run_as_desktop busctl --user --timeout=5 call \
+		org.freedesktop.secrets /org/freedesktop/secrets org.freedesktop.DBus.Properties GetAll \
+		s org.freedesktop.Secret.Service >/dev/null
 }
 
 install_go_tool_if_missing() {
@@ -521,7 +554,8 @@ install_secure_local_user_mode() {
 	done
 	systemctl is-active --quiet "$unit" || fail_with_unit_logs "$unit"
 	wait_for_secret_service_owner || fail_with_unit_logs "$unit"
-	assert_secret_service_owned_by_dispatcher
+	assert_secret_service_owned_by_desktop_user
+	assert_secret_service_responds
 	assert_secure_api_requires_auth
 	log "secure-local user install mode started successfully"
 }
