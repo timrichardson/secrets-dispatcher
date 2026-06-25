@@ -775,7 +775,10 @@ func NewTemporaryDecisionAttribution(rule *AutoApproveRule) *DecisionAttribution
 		Action:           "approve",
 		RuleID:           rule.ID,
 		RuleRequestTypes: []string{string(rule.RequestType)},
-		Process:          &ProcessMatcher{Unit: rule.InvokerName},
+	}
+	info.Process = cloneProcessMatcher(rule.Process)
+	if info.Process == nil && rule.InvokerName != "" {
+		info.Process = &ProcessMatcher{Unit: rule.InvokerName}
 	}
 	if rule.RequestType == RequestTypeSearch {
 		info.SearchAttributes = cloneStringMap(rule.Attributes)

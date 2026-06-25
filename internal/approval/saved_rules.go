@@ -510,6 +510,9 @@ func savedApprovalRuleFromTemporary(rule AutoApproveRule) SavedApprovalRule {
 		RequestTypes: []string{string(rule.RequestType)},
 		Process:      cloneProcessMatcher(rule.Process),
 	}
+	if saved.Process == nil && rule.InvokerName != "" {
+		saved.Process = &ProcessMatcher{Unit: globQuote(rule.InvokerName)}
+	}
 	if rule.RequestType == RequestTypeSearch {
 		saved.SearchAttributes = quoteMap(rule.Attributes)
 	} else {
@@ -528,6 +531,12 @@ func processMatcherFromSender(sender SenderInfo) *ProcessMatcher {
 		if first.Exe != "" {
 			return &ProcessMatcher{Exe: globQuote(first.Exe)}
 		}
+		if first.Name != "" {
+			return &ProcessMatcher{Name: globQuote(first.Name)}
+		}
+	}
+	if sender.UnitName != "" {
+		return &ProcessMatcher{Unit: globQuote(sender.UnitName)}
 	}
 	return nil
 }

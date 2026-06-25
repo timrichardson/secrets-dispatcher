@@ -151,6 +151,34 @@ func TestSavedApprovalRule_GeneratedRuleUsesExecutablePath(t *testing.T) {
 	}
 }
 
+func TestPersistAutoApproveRule_UsesStableProcessMatcher(t *testing.T) {
+	store := NewFileSavedApprovalRuleStore(t.TempDir())
+	mgr := NewManager(ManagerConfig{
+		Timeout:             20 * time.Millisecond,
+		HistoryMax:          10,
+		AutoApproveDuration: time.Minute,
+		SavedRulesStore:     store,
+	})
+
+	tempID := mgr.AddAutoApproveRule(savedRuleTestRequest(map[string]string{"service": "github"}))
+	saved, err := mgr.PersistAutoApproveRule(tempID)
+	if err != nil {
+		t.Fatalf("PersistAutoApproveRule failed: %v", err)
+	}
+	if saved.Process == nil || saved.Process.Exe != "/usr/bin/gh" {
+		t.Fatalf("persisted process matcher = %#v, want executable path", saved.Process)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	reloaded := NewManager(ManagerConfig{SavedApprovalRules: loaded})
+	if rule := reloaded.CheckSavedApprovalRules(savedRuleSender("/usr/bin/gh"), savedRuleTestRequest(map[string]string{"service": "github"}).Items, RequestTypeGetSecret, nil); rule == nil {
+		t.Fatal("expected persisted temporary rule to match after reload")
+	}
+}
+
 func TestSavedApprovalRule_MultiItemRequiresEveryItemToMatch(t *testing.T) {
 	mgr := NewManager(ManagerConfig{Timeout: 20 * time.Millisecond, HistoryMax: 10})
 	mgr.AddHistoryEntry(HistoryEntry{Request: savedRuleTestRequest(map[string]string{"service": "github"}), Resolution: ResolutionApproved})

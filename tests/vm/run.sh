@@ -8,13 +8,15 @@ DISTRO=${1:-${DISTRO:-ubuntu}}
 MODE=${MODE:-local}
 BACKEND=${BACKEND:-gnome-keyring}
 SCENARIO=${SCENARIO:-$MODE}
-GNOME_PROFILE=${GNOME_PROFILE:-desktop}
+GNOME_PROFILE=${GNOME_PROFILE:-}
 DESKTOP_USER=${DESKTOP_USER:-sdtest}
 VM_NAME=${VM_NAME:-secrets-dispatcher-${DISTRO}-${SCENARIO}-${BACKEND}}
 VM_DIR=${VM_DIR:-$ROOT_DIR/.vm/$VM_NAME}
 VM_IMAGE_CACHE=${VM_IMAGE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/secrets-dispatcher/vm-images}
 BINARY=${BINARY:-$ROOT_DIR/secrets-dispatcher}
 KEEP_VM=${KEEP_VM:-0}
+APPROVAL_RULE_TEMP_DURATION=${APPROVAL_RULE_TEMP_DURATION:-4s}
+APPROVAL_RULE_EXPIRY_WAIT=${APPROVAL_RULE_EXPIRY_WAIT:-6}
 GOPASS_SOURCE=${GOPASS_SOURCE:-github.com/gopasspw/gopass@latest}
 GOPASS_SECRET_SERVICE_SOURCE=${GOPASS_SECRET_SERVICE_SOURCE:-github.com/nikicat/gopass-secret-service/cmd/gopass-secret@latest}
 GOPASS_SECRET_SERVICE_BIN=${GOPASS_SECRET_SERVICE_BIN:-/usr/local/bin/gopass-secret-service}
@@ -28,12 +30,20 @@ FEDORA_IMAGE_URL=${FEDORA_IMAGE_URL:-https://download.fedoraproject.org/pub/fedo
 case "$SCENARIO" in
 normal) SCENARIO=local ;;
 secure-local) SCENARIO=secure-local-user ;;
-local|full|secure-local-user) ;;
+local|full|secure-local-user|approval-rules) ;;
 *)
-	echo "unsupported SCENARIO=$SCENARIO (want local, full, or secure-local-user)" >&2
+	echo "unsupported SCENARIO=$SCENARIO (want local, full, secure-local-user, or approval-rules)" >&2
 	exit 2
 	;;
 esac
+
+if [ -z "$GNOME_PROFILE" ]; then
+	if [ "$SCENARIO" = approval-rules ]; then
+		GNOME_PROFILE=minimal
+	else
+		GNOME_PROFILE=desktop
+	fi
+fi
 
 case "$BACKEND" in
 gnome-keyring|gopass) ;;
@@ -46,6 +56,19 @@ esac
 if [ "$SCENARIO" = secure-local-user ] && [ "$BACKEND" != gnome-keyring ]; then
 	echo "secure-local-user currently supports BACKEND=gnome-keyring only" >&2
 	exit 2
+fi
+
+if [ "$SCENARIO" = approval-rules ] && [ "$BACKEND" != gopass ]; then
+	echo "approval-rules currently supports BACKEND=gopass only" >&2
+	exit 2
+fi
+
+if [ "$SCENARIO" = approval-rules ]; then
+	GUEST_SCRIPT=guest-approval-rules.sh
+	GUEST_DESCRIPTION="approval-rule integration test"
+else
+	GUEST_SCRIPT=guest-smoke.sh
+	GUEST_DESCRIPTION="smoke test"
 fi
 
 case "$DISTRO" in
@@ -292,13 +315,13 @@ ssh "${SSH_OPTS[@]}" "tester@$IP" true
 
 echo "copying binary and guest test script"
 scp "${SSH_OPTS[@]}" "$BINARY" "tester@$IP:/tmp/secrets-dispatcher"
-scp "${SSH_OPTS[@]}" "$SCRIPT_DIR/guest-smoke.sh" "tester@$IP:/tmp/guest-smoke.sh"
+scp "${SSH_OPTS[@]}" "$SCRIPT_DIR/$GUEST_SCRIPT" "tester@$IP:/tmp/$GUEST_SCRIPT"
 
 ssh "${SSH_OPTS[@]}" "tester@$IP" \
-	"sudo install -m 0755 /tmp/secrets-dispatcher /usr/local/bin/secrets-dispatcher && sudo chmod 0755 /tmp/guest-smoke.sh"
+	"sudo install -m 0755 /tmp/secrets-dispatcher /usr/local/bin/secrets-dispatcher && sudo chmod 0755 /tmp/$GUEST_SCRIPT"
 
-echo "running guest smoke test"
+echo "running guest $GUEST_DESCRIPTION"
 ssh "${SSH_OPTS[@]}" "tester@$IP" \
-	"sudo env DISTRO='$DISTRO' SCENARIO='$SCENARIO' MODE='$MODE' BACKEND='$BACKEND' GNOME_PROFILE='$GNOME_PROFILE' DESKTOP_USER='$DESKTOP_USER' GOPASS_SOURCE='$GOPASS_SOURCE' GOPASS_SECRET_SERVICE_SOURCE='$GOPASS_SECRET_SERVICE_SOURCE' GOPASS_SECRET_SERVICE_BIN='$GOPASS_SECRET_SERVICE_BIN' /tmp/guest-smoke.sh"
+	"sudo env DISTRO='$DISTRO' SCENARIO='$SCENARIO' MODE='$MODE' BACKEND='$BACKEND' GNOME_PROFILE='$GNOME_PROFILE' DESKTOP_USER='$DESKTOP_USER' APPROVAL_RULE_TEMP_DURATION='$APPROVAL_RULE_TEMP_DURATION' APPROVAL_RULE_EXPIRY_WAIT='$APPROVAL_RULE_EXPIRY_WAIT' GOPASS_SOURCE='$GOPASS_SOURCE' GOPASS_SECRET_SERVICE_SOURCE='$GOPASS_SECRET_SERVICE_SOURCE' GOPASS_SECRET_SERVICE_BIN='$GOPASS_SECRET_SERVICE_BIN' /tmp/$GUEST_SCRIPT"
 
-echo "VM smoke test passed: distro=$DISTRO scenario=$SCENARIO backend=$BACKEND"
+echo "VM $GUEST_DESCRIPTION passed: distro=$DISTRO scenario=$SCENARIO backend=$BACKEND"

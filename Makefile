@@ -3,6 +3,7 @@ MAKEFLAGS += -j
 .PHONY: all build frontend backend backend-dev install clean test test-go test-e2e test-e2e-all test-e2e-browser \
 	vm-test vm-test-all vm-test-ubuntu vm-test-fedora vm-test-ubuntu-normal \
 	vm-test-ubuntu-gnome vm-test-fedora-gnome vm-test-ubuntu-gopass vm-test-fedora-gopass \
+	vm-test-approval-rules vm-test-fedora-approval-rules \
 	vm-test-ubuntu-secure-local vm-test-ubuntu-secure-local-user vm-test-fedora-secure-local-user \
 	playwright-install dev version pre-commit screenshots \
 	check check-go check-go-fmt check-go-vet check-go-staticcheck check-frontend check-frontend-fmt check-frontend-lint \
@@ -67,6 +68,12 @@ vm-test-ubuntu-gopass: backend
 
 vm-test-fedora-gopass: backend
 	DISTRO=fedora SCENARIO=local BACKEND=gopass tests/vm/run.sh
+
+vm-test-approval-rules: backend
+	DISTRO=ubuntu SCENARIO=approval-rules BACKEND=gopass GNOME_PROFILE=minimal tests/vm/run.sh
+
+vm-test-fedora-approval-rules: backend
+	DISTRO=fedora SCENARIO=approval-rules BACKEND=gopass GNOME_PROFILE=minimal tests/vm/run.sh
 
 vm-test-ubuntu-secure-local: vm-test-ubuntu-secure-local-user
 

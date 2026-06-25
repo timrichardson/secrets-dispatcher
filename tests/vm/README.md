@@ -12,6 +12,7 @@ The smoke tests cover:
 - Ubuntu local install with a dispatcher-supervised private gopass backend.
 - Fedora local install with a dispatcher-supervised private gopass backend.
 - Secure-local provisioning plus the desktop-user `service install --mode secure-local --start` path.
+- Saved approval-rule persistence through a real notification action flow with a gopass Secret Service backend.
 
 ## Host Dependencies
 
@@ -66,6 +67,13 @@ make vm-test-ubuntu-secure-local-user
 make vm-test-fedora-secure-local-user
 ```
 
+Run saved approval-rule integration tests:
+
+```bash
+make vm-test-approval-rules
+make vm-test-fedora-approval-rules
+```
+
 Compatibility aliases:
 
 ```bash
@@ -78,7 +86,7 @@ make vm-test-ubuntu-secure-local
 Useful environment variables:
 
 - `DISTRO`: `ubuntu` or `fedora`.
-- `SCENARIO`: `local`, `full`, or `secure-local-user`; `normal` aliases to `local`, and `secure-local` aliases to `secure-local-user`.
+- `SCENARIO`: `local`, `full`, `secure-local-user`, or `approval-rules`; `normal` aliases to `local`, and `secure-local` aliases to `secure-local-user`.
 - `BACKEND`: `gnome-keyring` or `gopass` for local/full scenarios.
 - `MODE`: fallback scenario value for older invocations. Defaults to `local`.
 - `DESKTOP_USER`: desktop user created inside the VM. Defaults to `sdtest`.
@@ -93,6 +101,28 @@ Useful environment variables:
 - `GOPASS_SOURCE`: Go package used when `gopass` is not available from distro packages; defaults to `github.com/gopasspw/gopass@latest`.
 - `GOPASS_SECRET_SERVICE_SOURCE`: Go package used when `gopass-secret-service` is not available; defaults to `github.com/nikicat/gopass-secret-service/cmd/gopass-secret@latest`.
 - `GOPASS_SECRET_SERVICE_BIN`: backend command path used for `BACKEND=gopass`; defaults to `/usr/local/bin/gopass-secret-service`.
+- `APPROVAL_RULE_TEMP_DURATION`: temporary rule duration for `SCENARIO=approval-rules`. Defaults to `4s`.
+- `APPROVAL_RULE_EXPIRY_WAIT`: seconds to sleep before proving the saved rule outlives the temporary rule. Defaults to `6`.
+
+## Approval-Rule Scope
+
+The `approval-rules` scenario performs these checks inside the VM:
+
+- Seed multiple secrets in a disposable gopass Secret Service backend.
+- Access a secret through `secret-tool` and approve it from a deterministic test notification server with `Approve similar`.
+- Save the follow-up rule from the follow-up notification.
+- Wait for the temporary rule window to expire.
+- Verify the saved rule still auto-approves in the current daemon session.
+- Restart `secrets-dispatcher` and verify the saved rule is loaded from disk.
+- Verify a different secret still prompts and can be denied.
+
+The guest owns `org.freedesktop.Notifications` directly so the notification action path is exercised without fragile shell UI automation.
+
+For a wall-clock fidelity run of the default two-minute temporary window:
+
+```bash
+APPROVAL_RULE_TEMP_DURATION=2m APPROVAL_RULE_EXPIRY_WAIT=130 make vm-test-approval-rules
+```
 
 ## Local Scope
 
