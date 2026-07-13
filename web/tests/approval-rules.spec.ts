@@ -73,7 +73,8 @@ async function injectHistoryEntry(
           pid: 4242,
           uid: 1000,
           user_name: "testuser",
-          unit_name: unitName,
+          invoker_name: unitName,
+          systemd_unit: `${unitName}.service`,
           process_chain: [
             {
               name: unitName,
@@ -268,7 +269,8 @@ test.describe("Saved Approval Rules UI", () => {
                     pid: 5555,
                     uid: 1000,
                     user_name: "testuser",
-                    unit_name: "pending-invoker",
+                    invoker_name: "pending-invoker",
+                    systemd_unit: "pending-invoker.service",
                   },
                 },
               ];
