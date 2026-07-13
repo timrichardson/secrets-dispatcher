@@ -22,7 +22,7 @@ func savedRuleTestRequest(attrs map[string]string) *Request {
 
 func savedRuleSender(exe string) SenderInfo {
 	return SenderInfo{
-		UnitName:     "gh",
+		InvokerName:  "gh",
 		ProcessChain: []ProcessInfo{{Name: "gh", PID: 1, Exe: exe}},
 	}
 }
@@ -119,7 +119,7 @@ func TestSavedApprovalRule_DoesNotOverrideConfigDeny(t *testing.T) {
 			Name:         "deny-gh",
 			Action:       "deny",
 			RequestTypes: []string{"get_secret"},
-			Process:      &ProcessMatcher{Unit: "gh"},
+			Process:      &ProcessMatcher{Exe: "/usr/bin/gh"},
 		}},
 	})
 	mgr.AddHistoryEntry(HistoryEntry{Request: savedRuleTestRequest(map[string]string{"service": "github"}), Resolution: ResolutionApproved})

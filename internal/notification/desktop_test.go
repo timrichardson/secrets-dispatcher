@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -28,10 +29,11 @@ type mockNotifier struct {
 }
 
 type notifyCall struct {
-	summary string
-	body    string
-	icon    string
-	actions []string
+	summary    string
+	body       string
+	icon       string
+	actions    []string
+	replacesID uint32
 }
 
 func (m *mockNotifier) Notify(summary, body, icon string, actions []string) (uint32, error) {
@@ -41,8 +43,20 @@ func (m *mockNotifier) Notify(summary, body, icon string, actions []string) (uin
 		return 0, m.notifyErr
 	}
 	m.nextID++
-	m.notified = append(m.notified, notifyCall{summary, body, icon, actions})
+	m.notified = append(m.notified, notifyCall{summary: summary, body: body, icon: icon, actions: actions})
 	return m.nextID, nil
+}
+
+func (m *mockNotifier) NotifyReplacing(replacesID uint32, summary, body, icon string, actions []string) (uint32, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.notifyErr != nil {
+		return 0, m.notifyErr
+	}
+	m.notified = append(m.notified, notifyCall{
+		summary: summary, body: body, icon: icon, actions: actions, replacesID: replacesID,
+	})
+	return replacesID, nil
 }
 
 func (m *mockNotifier) NotifyPersistent(summary, body, icon string) (uint32, error) {
@@ -118,6 +132,26 @@ func (a *mockApprover) Deny(id string) error {
 	return nil
 }
 
+func (a *mockApprover) ApproveForProcess(id string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.err != nil {
+		return a.err
+	}
+	a.approved = append(a.approved, "process:"+id)
+	return nil
+}
+
+func (a *mockApprover) ApproveFor24Hours(id string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.err != nil {
+		return a.err
+	}
+	a.approved = append(a.approved, "24h:"+id)
+	return nil
+}
+
 func (a *mockApprover) AutoApprove(requestID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -182,11 +216,11 @@ func TestHandler_OnEvent_RequestCreated(t *testing.T) {
 	if call.summary != "Secret requested" {
 		t.Errorf("unexpected summary: %s", call.summary)
 	}
-	if !contains(call.body, "<b>ssh-agent.service</b>@user@remote[1234]") {
-		t.Errorf("body should contain proc@client[pid] header: %s", call.body)
+	if !contains(call.body, "<b>Application:</b> ssh-agent") {
+		t.Errorf("body should identify the application: %s", call.body)
 	}
-	if !contains(call.body, "<i>GitHub Token</i>") {
-		t.Errorf("body should contain italic secret label: %s", call.body)
+	if !contains(call.body, "<b>Secret:</b> GitHub Token") {
+		t.Errorf("body should identify the secret: %s", call.body)
 	}
 }
 
@@ -203,7 +237,7 @@ func TestHandler_OnEvent_RequestCreated_Actions(t *testing.T) {
 	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: req})
 
 	call := mock.lastNotify()
-	wantActions := []string{"default", "", "approve", "Approve", "approve_and_auto_approve", "Approve similar", "deny", "Deny"}
+	wantActions := []string{"approve", "Approve once", "deny", "Deny", "details", "Details"}
 	if len(call.actions) != len(wantActions) {
 		t.Fatalf("expected %d actions, got %d: %v", len(wantActions), len(call.actions), call.actions)
 	}
@@ -212,8 +246,14 @@ func TestHandler_OnEvent_RequestCreated_Actions(t *testing.T) {
 			t.Errorf("action[%d]: want %q, got %q", i, a, call.actions[i])
 		}
 	}
-	if !contains(call.body, "Approve similar: allow matching requests for 2m") {
-		t.Errorf("body should explain Approve similar duration: %s", call.body)
+	if !contains(call.body, `Select Details for full request information`) {
+		t.Errorf("body should explain the Details action: %s", call.body)
+	}
+	if contains(call.body, "http://") || contains(call.body, "<a ") {
+		t.Errorf("body should not expose a raw or markup URL: %s", call.body)
+	}
+	if slices.Contains(call.actions, "default") {
+		t.Errorf("body/default action would dismiss the approval notification: %v", call.actions)
 	}
 }
 
@@ -250,10 +290,11 @@ func TestHandler_OnEvent_RequestResolved_ClosesNotification(t *testing.T) {
 
 func TestHandler_OnEvent_AllResolutionTypes(t *testing.T) {
 	resolutions := map[string]approval.EventType{
-		"approved":  approval.EventRequestApproved,
-		"denied":    approval.EventRequestDenied,
-		"expired":   approval.EventRequestExpired,
-		"cancelled": approval.EventRequestCancelled,
+		"approved":      approval.EventRequestApproved,
+		"denied":        approval.EventRequestDenied,
+		"expired":       approval.EventRequestExpired,
+		"cancelled":     approval.EventRequestCancelled,
+		"auto-approved": approval.EventRequestAutoApproved,
 	}
 
 	for name, resolution := range resolutions {
@@ -310,8 +351,8 @@ func TestHandler_FormatBody_Search(t *testing.T) {
 	if call.summary != "Secrets searched" {
 		t.Errorf("expected summary 'Secrets searched', got %q", call.summary)
 	}
-	if !contains(call.body, "<i>service=github</i>") {
-		t.Errorf("body should contain italic search attributes: %s", call.body)
+	if !contains(call.body, "<b>Secret:</b> service=github") {
+		t.Errorf("body should identify search attributes: %s", call.body)
 	}
 }
 
@@ -332,8 +373,8 @@ func TestHandler_FormatBody_MultipleItems(t *testing.T) {
 	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: req})
 
 	call := mock.lastNotify()
-	if !contains(call.body, "<i>3 items</i>") {
-		t.Errorf("body should show italic item count: %s", call.body)
+	if !contains(call.body, "<b>Secret:</b> 3 secrets") {
+		t.Errorf("body should show secret count: %s", call.body)
 	}
 }
 
@@ -354,8 +395,8 @@ func TestHandler_FormatBody_PIDOnly(t *testing.T) {
 	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: req})
 
 	call := mock.lastNotify()
-	if !contains(call.body, "<b>user@host</b>[5678]") {
-		t.Errorf("body should show client[pid]: %s", call.body)
+	if !contains(call.body, "<b>Application:</b> user@host") {
+		t.Errorf("body should identify the client: %s", call.body)
 	}
 }
 
@@ -552,11 +593,140 @@ func TestHandler_FormatBody_DeleteWithProcessChain(t *testing.T) {
 	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: req})
 
 	call := mock.lastNotify()
-	if !contains(call.body, "<b>My Secret</b>") {
-		t.Errorf("body should contain bold item label: %s", call.body)
+	if !contains(call.body, "<b>Secret:</b> My Secret") {
+		t.Errorf("body should identify the secret: %s", call.body)
 	}
 	if !contains(call.body, "secret-tool") {
 		t.Errorf("body should contain process chain: %s", call.body)
+	}
+}
+
+func TestHandler_FormatBody_TruncatesLongProcessChain(t *testing.T) {
+	h, mock, _ := newTestHandler()
+	h.showPIDs = true
+
+	req := &approval.Request{
+		ID:    "long-chain-1",
+		Type:  approval.RequestTypeGetSecret,
+		Items: []approval.ItemInfo{{Label: "org.freedesktop.Secret.Generic"}},
+		SenderInfo: approval.SenderInfo{ProcessChain: []approval.ProcessInfo{
+			{Name: "bitwarden-app", PID: 246800},
+			{Name: "bitwarden", PID: 246791},
+			{Name: "binfmt-bypass", PID: 246708},
+			{Name: "gnome-shell", PID: 18430},
+			{Name: "systemd", PID: 13426},
+		}},
+	}
+
+	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: req})
+
+	body := mock.lastNotify().body
+	for _, want := range []string{
+		"<b>Application:</b> bitwarden-app",
+		"<b>Request:</b> Read secret",
+		"<b>Secret:</b> Generic secret",
+		"<b>Process:</b> bitwarden-app[246800] ← bitwarden[246791] ← … (+2) ← systemd[13426]",
+	} {
+		if !contains(body, want) {
+			t.Fatalf("body should contain %q, got: %s", want, body)
+		}
+	}
+	if contains(body, "binfmt-bypass") || contains(body, "gnome-shell") {
+		t.Fatalf("body should omit distant parent names, got: %s", body)
+	}
+}
+
+func TestHandler_FormatBody_GenericSecretUsesAttributes(t *testing.T) {
+	h, mock, _ := newTestHandler()
+	req := &approval.Request{
+		ID:   "bitwarden-generic",
+		Type: approval.RequestTypeGetSecret,
+		Items: []approval.ItemInfo{{
+			Label: "org.freedesktop.Secret.Generic",
+			Attributes: map[string]string{
+				"service": "Bitwarden",
+				"account": "573d16e3-f086-460d-a51e-aab700758698_accessTokenKey",
+			},
+		}},
+		SenderInfo: approval.SenderInfo{ProcessChain: []approval.ProcessInfo{{Name: "bitwarden-app"}}},
+	}
+
+	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: req})
+	body := mock.lastNotify().body
+	if !contains(body, "<b>Secret:</b> Bitwarden — access token (account 573d16e3…)") {
+		t.Fatalf("generic label should be replaced by a useful safe description, got: %s", body)
+	}
+	if contains(body, "org.freedesktop.Secret.Generic") || contains(body, "a51e-aab700758698") {
+		t.Fatalf("body should omit generic label and full account identifier, got: %s", body)
+	}
+}
+
+func TestHandler_FormatBody_UsesReadableNotificationSeparators(t *testing.T) {
+	h, mock, _ := newTestHandler()
+	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: &approval.Request{
+		ID: "separators", Type: approval.RequestTypeGetSecret,
+		Items:      []approval.ItemInfo{{Label: "Token"}},
+		SenderInfo: approval.SenderInfo{ProcessChain: []approval.ProcessInfo{{Name: "zed"}}},
+	}})
+	body := mock.lastNotify().body
+	if strings.Contains(body, "<br") || strings.Contains(body, "\n") {
+		t.Fatalf("notification body should not rely on unsupported line-break rendering: %q", body)
+	}
+	if strings.Count(body, " • ") < 4 {
+		t.Fatalf("expected visible separators between fields, got: %s", body)
+	}
+}
+
+func TestHandler_CoalescesEquivalentRequestBurst(t *testing.T) {
+	h, mock, approver := newTestHandler()
+	newRequest := func(id string) *approval.Request {
+		return &approval.Request{
+			ID:    id,
+			Type:  approval.RequestTypeGetSecret,
+			Items: []approval.ItemInfo{{Label: "ChatGPT OAuth token", Path: "/secret/chatgpt"}},
+			SenderInfo: approval.SenderInfo{ProcessChain: []approval.ProcessInfo{{
+				Name: "zed", PID: 100, Exe: "/home/tim/.local/zed.app/libexec/zed-editor",
+			}}},
+		}
+	}
+
+	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: newRequest("burst-1")})
+	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: newRequest("burst-2")})
+	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: newRequest("burst-3")})
+
+	if mock.notifyCount() != 3 {
+		t.Fatalf("expected initial notification plus 2 replacements, got %d calls", mock.notifyCount())
+	}
+	call := mock.lastNotify()
+	if call.replacesID == 0 {
+		t.Fatalf("equivalent requests should replace the existing notification")
+	}
+	if !contains(call.body, "<b>Repeated:</b> 3 equivalent requests") {
+		t.Fatalf("notification should show burst count, got: %s", call.body)
+	}
+
+	h.handleAction(Action{NotificationID: call.replacesID, ActionKey: "approve"})
+	approver.mu.Lock()
+	defer approver.mu.Unlock()
+	if len(approver.approved) != 3 {
+		t.Fatalf("approving grouped notification should approve all 3 requests, got %v", approver.approved)
+	}
+}
+
+func TestHandler_DoesNotCoalesceDifferentSecrets(t *testing.T) {
+	h, mock, _ := newTestHandler()
+	for i, label := range []string{"ChatGPT OAuth token", "Ollama API key"} {
+		h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: &approval.Request{
+			ID:    fmt.Sprintf("different-%d", i),
+			Type:  approval.RequestTypeGetSecret,
+			Items: []approval.ItemInfo{{Label: label, Path: "/secret/" + label}},
+			SenderInfo: approval.SenderInfo{ProcessChain: []approval.ProcessInfo{{
+				Name: "zed", Exe: "/home/tim/.local/zed.app/libexec/zed-editor",
+			}}},
+		}})
+	}
+	if mock.notifyCount() != 2 || mock.lastNotify().replacesID != 0 {
+		t.Fatalf("different secrets must remain separate prompts: %#v", mock.notified)
 	}
 }
 
@@ -653,41 +823,33 @@ func TestHandler_ListenActions_Approve(t *testing.T) {
 	}
 }
 
-func TestHandler_ApproveSimilarFollowUp_SaveRule(t *testing.T) {
-	h, mock, approver := newTestHandler()
+func TestHandler_DirectAllowanceScopes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		action     string
+		wantRecord string
+	}{
+		{name: "process", action: "allow_process", wantRecord: "process:allow-scope"},
+		{name: "24 hours", action: "allow_24h", wantRecord: "24h:allow-scope"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, approver := newTestHandler()
+			req := &approval.Request{
+				ID: "allow-scope", Client: "user@host", Type: approval.RequestTypeGetSecret,
+				Items: []approval.ItemInfo{{Label: "Secret"}},
+			}
+			h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: req})
+			h.mu.Lock()
+			nID := h.notifications[req.ID]
+			h.mu.Unlock()
 
-	req := &approval.Request{
-		ID:     "action-save-rule-1",
-		Client: "user@host",
-		Type:   approval.RequestTypeGetSecret,
-		Items:  []approval.ItemInfo{{Label: "Secret"}},
-	}
-
-	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: req})
-	h.mu.Lock()
-	nID := h.notifications[req.ID]
-	h.mu.Unlock()
-
-	h.handleAction(Action{NotificationID: nID, ActionKey: "approve_and_auto_approve"})
-	if mock.notifyCount() != 2 {
-		t.Fatalf("expected original and follow-up notification, got %d", mock.notifyCount())
-	}
-
-	var followUpID uint32
-	h.mu.Lock()
-	for id := range h.rulePrompts {
-		followUpID = id
-	}
-	h.mu.Unlock()
-	if followUpID == 0 {
-		t.Fatal("follow-up notification was not tracked")
-	}
-
-	h.handleAction(Action{NotificationID: followUpID, ActionKey: "save_rule"})
-	approver.mu.Lock()
-	defer approver.mu.Unlock()
-	if len(approver.savedRules) != 1 || approver.savedRules[0] != req.ID {
-		t.Fatalf("savedRules = %v, want [%s]", approver.savedRules, req.ID)
+			h.handleAction(Action{NotificationID: nID, ActionKey: tc.action})
+			approver.mu.Lock()
+			defer approver.mu.Unlock()
+			if !slices.Equal(approver.approved, []string{tc.wantRecord}) {
+				t.Fatalf("approved = %v, want [%s]", approver.approved, tc.wantRecord)
+			}
+		})
 	}
 }
 
@@ -729,6 +891,43 @@ func TestHandler_ListenActions_Deny(t *testing.T) {
 	}
 }
 
+func TestHandler_DetailsOpensPortalAndReissuesPendingNotification(t *testing.T) {
+	h, mock, approver := newTestHandler()
+	var opened string
+	h.openURL = func(u string) { opened = u }
+	req := &approval.Request{
+		ID: "details-1", Client: "user@host", Type: approval.RequestTypeGetSecret,
+		Items: []approval.ItemInfo{{Label: "Secret"}},
+	}
+	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: req})
+	h.mu.Lock()
+	oldID := h.notifications[req.ID]
+	h.mu.Unlock()
+
+	h.handleAction(Action{NotificationID: oldID, ActionKey: "details"})
+	if opened != "http://127.0.0.1:8484?request=details-1" {
+		t.Fatalf("opened = %q", opened)
+	}
+	time.Sleep(250 * time.Millisecond)
+
+	h.mu.Lock()
+	newID := h.notifications[req.ID]
+	tracked := newID != 0 && newID != oldID && h.requests[newID] == req.ID
+	_, oldTracked := h.requests[oldID]
+	h.mu.Unlock()
+	if !tracked || oldTracked {
+		t.Fatalf("notification tracking was not moved from %d to %d", oldID, newID)
+	}
+	if mock.notifyCount() != 2 {
+		t.Fatalf("expected original and reissued notification, got %d", mock.notifyCount())
+	}
+	approver.mu.Lock()
+	defer approver.mu.Unlock()
+	if len(approver.approved) != 0 || len(approver.denied) != 0 {
+		t.Fatalf("Details must not resolve request: approved=%v denied=%v", approver.approved, approver.denied)
+	}
+}
+
 func TestHandler_ListenActions_DefaultOpensURL(t *testing.T) {
 	h, _, approver := newTestHandler()
 
@@ -764,6 +963,12 @@ func TestHandler_ListenActions_DefaultOpensURL(t *testing.T) {
 
 	if opened != "http://127.0.0.1:8484?request=action-default-1" {
 		t.Errorf("expected openURL called with request URL, got %q", opened)
+	}
+	h.mu.Lock()
+	stillTracked := h.notifications[req.ID] == nID && h.requests[nID] == req.ID
+	h.mu.Unlock()
+	if !stillTracked {
+		t.Error("opening the portal must leave the pending notification tracked")
 	}
 
 	approver.mu.Lock()

@@ -2,6 +2,7 @@ package approval
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,155 @@ import (
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestAutoApproveRuleRecallsAlreadyPendingEquivalentRequests(t *testing.T) {
+	mgr := NewManager(ManagerConfig{
+		Timeout: 5 * time.Second, HistoryMax: 100, AutoApproveDuration: time.Minute,
+	})
+	item := ItemInfo{
+		Path:       "/org/freedesktop/secrets/collection/login/87",
+		Attributes: map[string]string{"service": "Bitwarden", "account": "token"},
+	}
+	type result struct {
+		auto bool
+		err  error
+	}
+	results := make(chan result, 3)
+	start := func(sender string, requestItem ItemInfo) {
+		go func() {
+			auto, err := mgr.RequireApproval(
+				context.Background(), "local", []ItemInfo{requestItem}, "/session/1",
+				RequestTypeGetSecret, nil,
+				SenderInfo{Sender: sender, InvokerName: "bitwarden-app", ProcessChain: []ProcessInfo{{Name: "bitwarden-app", Exe: "/usr/bin/bitwarden-app"}}},
+			)
+			results <- result{auto: auto, err: err}
+		}()
+	}
+
+	start(":1.1", item)
+	start(":1.2", item)
+	otherItem := item
+	otherItem.Path = "/org/freedesktop/secrets/collection/login/88"
+	otherItem.Attributes = map[string]string{"service": "Other"}
+	start(":1.3", otherItem)
+
+	var pending []*Request
+	for range 100 {
+		pending = mgr.List()
+		if len(pending) == 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(pending) != 3 {
+		t.Fatalf("expected three pending requests, got %d", len(pending))
+	}
+
+	var approvedID, otherID string
+	for _, req := range pending {
+		if req.Items[0].Path == item.Path && approvedID == "" {
+			approvedID = req.ID
+		} else if req.Items[0].Path == otherItem.Path {
+			otherID = req.ID
+		}
+	}
+	if err := mgr.ApproveAndAutoApprove(approvedID); err != nil {
+		t.Fatalf("ApproveAndAutoApprove: %v", err)
+	}
+
+	autoResults := 0
+	for range 2 {
+		select {
+		case got := <-results:
+			if got.err != nil {
+				t.Fatalf("matching request failed: %v", got.err)
+			}
+			if got.auto {
+				autoResults++
+			}
+		case <-time.After(time.Second):
+			t.Fatal("matching pending request was not recalled")
+		}
+	}
+	if autoResults != 1 {
+		t.Fatalf("auto-approved results=%d, want exactly 1 recalled request", autoResults)
+	}
+	remaining := mgr.List()
+	if len(remaining) != 1 || remaining[0].ID != otherID {
+		t.Fatalf("non-matching pending request was affected: %+v", remaining)
+	}
+
+	history := mgr.History()
+	var approved, autoApproved int
+	for _, entry := range history {
+		switch entry.Resolution {
+		case ResolutionApproved:
+			approved++
+		case ResolutionAutoApproved:
+			autoApproved++
+		}
+	}
+	if approved != 1 || autoApproved != 1 {
+		t.Fatalf("history approved=%d auto_approved=%d, want 1 each", approved, autoApproved)
+	}
+
+	if err := mgr.Deny(otherID); err != nil {
+		t.Fatalf("cleanup deny: %v", err)
+	}
+	<-results
+}
+
+func TestProcessAnd24HourAutoApproveScopes(t *testing.T) {
+	pid := uint32(os.Getpid())
+	item := ItemInfo{
+		Path:       "/org/freedesktop/secrets/collection/login/87",
+		Attributes: map[string]string{"service": "Bitwarden", "account": "token"},
+	}
+	sender := SenderInfo{
+		PID: pid,
+		ProcessChain: []ProcessInfo{{
+			PID: pid, Name: "manager.test", Exe: "/proc/self/exe",
+		}},
+	}
+	req := &Request{Type: RequestTypeGetSecret, Items: []ItemInfo{item}, SenderInfo: sender}
+	mgr := NewManager(ManagerConfig{Timeout: time.Second, HistoryMax: 10})
+
+	processRuleID, err := mgr.AddProcessAutoApproveRule(req)
+	if err != nil {
+		t.Fatalf("AddProcessAutoApproveRule: %v", err)
+	}
+	if processRuleID == "" {
+		t.Fatal("process rule ID is empty")
+	}
+	processRule := mgr.CheckAutoApproveRules(sender, []ItemInfo{item}, RequestTypeGetSecret)
+	if processRule == nil || processRule.ProcessPID != pid || processRule.ProcessStartTime == 0 {
+		t.Fatalf("process rule did not match exact process instance: %+v", processRule)
+	}
+	otherSender := sender
+	otherSender.PID = pid + 1
+	if got := mgr.CheckAutoApproveRules(otherSender, []ItemInfo{item}, RequestTypeGetSecret); got != nil {
+		t.Fatalf("process rule matched a different PID: %+v", got)
+	}
+	otherItem := item
+	otherItem.Path = "/org/freedesktop/secrets/collection/login/88"
+	if got := mgr.CheckAutoApproveRules(sender, []ItemInfo{otherItem}, RequestTypeGetSecret); got != nil {
+		t.Fatalf("process rule matched a different item: %+v", got)
+	}
+
+	mgr = NewManager(ManagerConfig{Timeout: time.Second, HistoryMax: 10})
+	before := time.Now().Add(23*time.Hour + 59*time.Minute)
+	ruleID := mgr.Add24HourAutoApproveRule(req)
+	if ruleID == "" {
+		t.Fatal("24-hour rule ID is empty")
+	}
+	rules := mgr.ListAutoApproveRules()
+	if len(rules) != 1 || rules[0].ExpiresAt.Before(before) || rules[0].ExpiresAt.After(time.Now().Add(24*time.Hour+time.Minute)) {
+		t.Fatalf("unexpected 24-hour expiry: %+v", rules)
+	}
+	if got := mgr.CheckAutoApproveRules(sender, []ItemInfo{otherItem}, RequestTypeGetSecret); got != nil {
+		t.Fatalf("24-hour rule matched a different item: %+v", got)
+	}
+}
 
 func TestManager_RequireApproval_Approved(t *testing.T) {
 	mgr := NewManager(ManagerConfig{Timeout: 5 * time.Second, HistoryMax: 100})

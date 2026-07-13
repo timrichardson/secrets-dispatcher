@@ -73,7 +73,7 @@ func TestHandlers_PersistAutoApproveRule(t *testing.T) {
 			Attributes: map[string]string{"service": "github"},
 		}},
 		SenderInfo: approval.SenderInfo{
-			UnitName:     "gh",
+			InvokerName:  "gh",
 			ProcessChain: []approval.ProcessInfo{{Name: "gh", PID: 1, Exe: "/usr/bin/gh"}},
 		},
 	})

@@ -256,13 +256,14 @@ func TestAutoApproveRule_UsesProcessMatcherWhenAvailable(t *testing.T) {
 		Type:  RequestTypeGetSecret,
 		Items: []ItemInfo{{Path: "/org/freedesktop/secrets/collection/default/i1"}},
 		SenderInfo: SenderInfo{
-			UnitName:     "gh",
+			PID:          1,
+			InvokerName:  "gh",
 			ProcessChain: []ProcessInfo{{Name: "gh", PID: 1, Exe: "/usr/bin/gh"}},
 		},
 	})
 
 	if rule := mgr.checkAutoApproveRules(
-		SenderInfo{UnitName: "gh", ProcessChain: []ProcessInfo{{Name: "gh", PID: 2, Exe: "/tmp/gh"}}},
+		SenderInfo{PID: 2, InvokerName: "gh", ProcessChain: []ProcessInfo{{Name: "gh", PID: 2, Exe: "/tmp/gh"}}},
 		[]ItemInfo{{Path: "/org/freedesktop/secrets/collection/default/i2"}},
 		RequestTypeGetSecret,
 		nil,
@@ -271,7 +272,7 @@ func TestAutoApproveRule_UsesProcessMatcherWhenAvailable(t *testing.T) {
 	}
 
 	if rule := mgr.checkAutoApproveRules(
-		SenderInfo{UnitName: "different", ProcessChain: []ProcessInfo{{Name: "gh", PID: 3, Exe: "/usr/bin/gh"}}},
+		SenderInfo{PID: 3, InvokerName: "different", ProcessChain: []ProcessInfo{{Name: "gh", PID: 3, Exe: "/usr/bin/gh"}}},
 		[]ItemInfo{{Path: "/org/freedesktop/secrets/collection/default/i2"}},
 		RequestTypeGetSecret,
 		nil,
@@ -289,11 +290,11 @@ func TestAutoApproveRule_MultiItemRequiresEveryItemToMatch(t *testing.T) {
 			Path:       "/org/freedesktop/secrets/collection/default/i1",
 			Attributes: map[string]string{"service": "github"},
 		}},
-		SenderInfo: SenderInfo{UnitName: "gh"},
+		SenderInfo: SenderInfo{InvokerName: "gh"},
 	})
 
 	if rule := mgr.checkAutoApproveRules(
-		SenderInfo{UnitName: "gh"},
+		SenderInfo{InvokerName: "gh"},
 		[]ItemInfo{
 			{Path: "/org/freedesktop/secrets/collection/default/i2", Attributes: map[string]string{"service": "github"}},
 			{Path: "/org/freedesktop/secrets/collection/default/i3", Attributes: map[string]string{"service": "bank"}},

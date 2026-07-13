@@ -4,9 +4,12 @@ package approval
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"os"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -115,8 +118,9 @@ type Request struct {
 	GPGExitCode int `json:"-"`
 
 	// Internal: channel signaled when request is approved/denied
-	done   chan struct{}
-	result bool // true = approved, false = denied
+	done         chan struct{}
+	result       bool // true = approved, false = denied
+	autoApproved bool // true when a pending request was recalled by a newly added rule
 }
 
 // DecisionAttribution describes the rule or trusted source that resolved a request.
@@ -165,14 +169,17 @@ type TrustedSigner struct {
 // retained for display/logging only — it is attacker-controllable
 // (prctl(PR_SET_NAME)) and must never be the basis for a match.
 type AutoApproveRule struct {
-	ID          string            `json:"id"`
-	InvokerName string            `json:"invoker_name"`
-	InvokerExe  string            `json:"invoker_exe,omitempty"`
-	RequestType RequestType       `json:"request_type"`
-	Process     *ProcessMatcher   `json:"process,omitempty"`
-	Collection  string            `json:"collection"`
-	Attributes  map[string]string `json:"attributes,omitempty"`
-	ExpiresAt   time.Time         `json:"expires_at"`
+	ID               string            `json:"id"`
+	InvokerName      string            `json:"invoker_name"`
+	InvokerExe       string            `json:"invoker_exe,omitempty"`
+	RequestType      RequestType       `json:"request_type"`
+	Process          *ProcessMatcher   `json:"process,omitempty"`
+	ProcessPID       uint32            `json:"process_pid,omitempty"`
+	ProcessStartTime uint64            `json:"process_start_time,omitempty"`
+	ItemPaths        []string          `json:"item_paths,omitempty"`
+	Collection       string            `json:"collection"`
+	Attributes       map[string]string `json:"attributes,omitempty"`
+	ExpiresAt        time.Time         `json:"expires_at"`
 }
 
 // Manager tracks pending approval requests and handles blocking until decision.
@@ -453,6 +460,20 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 	m.pending[req.ID] = req
 	m.mu.Unlock()
 
+	// Close the race where a rule is installed after the initial check but
+	// before this request enters the pending map. Re-checking after registration
+	// guarantees either the rule installer or this goroutine recalls it.
+	if rule := m.checkAutoApproveRules(senderInfo, items, reqType, searchAttrs); rule != nil {
+		m.recallPendingMatchingRule(rule)
+	}
+	m.mu.RLock()
+	_, stillPending := m.pending[req.ID]
+	autoApproved := req.autoApproved
+	m.mu.RUnlock()
+	if !stillPending && autoApproved {
+		return true, nil
+	}
+
 	// Notify observers of new request
 	m.notify(Event{Type: EventRequestCreated, Request: req})
 
@@ -470,7 +491,7 @@ func (m *Manager) RequireApproval(ctx context.Context, client string, items []It
 	select {
 	case <-req.done:
 		if req.result {
-			return false, nil
+			return req.autoApproved, nil
 		}
 		return false, ErrDenied
 	case <-timer.C:
@@ -696,10 +717,26 @@ func (m *Manager) AutoApproveDuration() time.Duration {
 // extractCollection extracts the collection name from a Secret Service item path.
 var extractCollection = dbustypes.ExtractCollection
 
-// AddAutoApproveRule creates a temporary auto-approve rule from a cancelled request.
-// Returns the rule ID.
+// AddAutoApproveRule creates a temporary auto-approve rule using the configured duration.
 func (m *Manager) AddAutoApproveRule(req *Request) string {
-	duration := m.autoApproveDuration
+	return m.addAutoApproveRule(req, m.AutoApproveDuration(), false, false)
+}
+
+// AddProcessAutoApproveRule creates a rule bound to the exact caller process instance.
+func (m *Manager) AddProcessAutoApproveRule(req *Request) (string, error) {
+	startTime := readProcessStartTime(req.SenderInfo.PID)
+	if req.SenderInfo.PID == 0 || startTime == 0 {
+		return "", fmt.Errorf("cannot identify requesting process instance")
+	}
+	return m.addAutoApproveRule(req, 100*365*24*time.Hour, true, true), nil
+}
+
+// Add24HourAutoApproveRule creates an exact-operation and exact-secret rule for 24 hours.
+func (m *Manager) Add24HourAutoApproveRule(req *Request) string {
+	return m.addAutoApproveRule(req, 24*time.Hour, false, true)
+}
+
+func (m *Manager) addAutoApproveRule(req *Request, duration time.Duration, bindProcess, bindExactItems bool) string {
 	if duration <= 0 {
 		duration = 2 * time.Minute
 	}
@@ -712,9 +749,19 @@ func (m *Manager) AddAutoApproveRule(req *Request) string {
 		Process:     processMatcherFromSender(req.SenderInfo),
 		ExpiresAt:   time.Now().Add(duration),
 	}
+	if bindProcess {
+		rule.ProcessPID = req.SenderInfo.PID
+		rule.ProcessStartTime = readProcessStartTime(req.SenderInfo.PID)
+	}
 
-	// Extract collection and attributes from first item
+	// Scoped UI grants bind to exact item paths; legacy temporary rules retain
+	// their established attribute-based retry semantics.
 	if len(req.Items) > 0 {
+		if bindExactItems {
+			for _, item := range req.Items {
+				rule.ItemPaths = append(rule.ItemPaths, item.Path)
+			}
+		}
 		rule.Collection = extractCollection(req.Items[0].Path)
 		rule.Attributes = req.Items[0].Attributes
 	}
@@ -731,22 +778,28 @@ func (m *Manager) AddAutoApproveRule(req *Request) string {
 		if existing.InvokerExe == rule.InvokerExe &&
 			existing.RequestType == rule.RequestType &&
 			processMatchersEqual(existing.Process, rule.Process) &&
+			existing.ProcessPID == rule.ProcessPID &&
+			existing.ProcessStartTime == rule.ProcessStartTime &&
+			slices.Equal(existing.ItemPaths, rule.ItemPaths) &&
 			existing.Collection == rule.Collection &&
 			attributesEqual(existing.Attributes, rule.Attributes) {
 			existing.ExpiresAt = rule.ExpiresAt
+			refreshed := *existing
 			m.autoApproveMu.Unlock()
-			m.notify(Event{Type: EventAutoApproveRuleAdded, Rule: existing})
+			m.notify(Event{Type: EventAutoApproveRuleAdded, Rule: &refreshed})
+			m.recallPendingMatchingRule(&refreshed)
 			slog.Info("auto-approve rule refreshed",
-				"rule_id", existing.ID,
-				"invoker", existing.InvokerName,
-				"expires_at", existing.ExpiresAt)
-			return existing.ID
+				"rule_id", refreshed.ID,
+				"invoker", refreshed.InvokerName,
+				"expires_at", refreshed.ExpiresAt)
+			return refreshed.ID
 		}
 	}
 	m.autoApproveRules = append(m.autoApproveRules, rule)
 	m.autoApproveMu.Unlock()
 
 	m.notify(Event{Type: EventAutoApproveRuleAdded, Rule: &rule})
+	m.recallPendingMatchingRule(&rule)
 	slog.Info("auto-approve rule added",
 		"rule_id", rule.ID,
 		"invoker", rule.InvokerName,
@@ -755,6 +808,44 @@ func (m *Manager) AddAutoApproveRule(req *Request) string {
 		"expires_at", rule.ExpiresAt)
 
 	return rule.ID
+}
+
+// recallPendingMatchingRule resolves requests that were queued before a newly
+// installed rule became visible. Resolution events let notification observers
+// cancel scheduled notifications or close already-displayed ones.
+func (m *Manager) recallPendingMatchingRule(rule *AutoApproveRule) int {
+	if rule == nil {
+		return 0
+	}
+
+	var recalled []*Request
+	m.mu.Lock()
+	for id, req := range m.pending {
+		// GPG approval is not just a gate: its resolver must run gpg and attach
+		// signature bytes before completing the request. Future matching GPG
+		// requests use the specialized auto-sign path, but an already-pending one
+		// cannot safely be completed by this generic sweep.
+		if req.Type == RequestTypeGPGSign {
+			continue
+		}
+		if !autoApproveRuleMatches(rule, req.SenderInfo, req.Items, req.Type, req.SearchAttributes) {
+			continue
+		}
+		req.result = true
+		req.autoApproved = true
+		req.Attribution = NewTemporaryDecisionAttribution(rule)
+		delete(m.pending, id)
+		close(req.done)
+		recalled = append(recalled, req)
+	}
+	m.mu.Unlock()
+
+	for _, req := range recalled {
+		slog.Info("recalled pending request after auto-approve rule added",
+			"request_id", req.ID, "rule_id", rule.ID)
+		m.notify(Event{Type: EventRequestAutoApproved, Request: req})
+	}
+	return len(recalled)
 }
 
 // CheckAutoApproveRules exposes checkAutoApproveRules for callers outside the
@@ -895,9 +986,62 @@ func LogTrustRuleMatch(rule *TrustRule, senderInfo SenderInfo, items []ItemInfo,
 	)
 }
 
+func autoApproveRuleMatches(rule *AutoApproveRule, senderInfo SenderInfo, items []ItemInfo, reqType RequestType, searchAttrs map[string]string) bool {
+	// Ephemeral approvals must retain upstream's non-spoofable executable
+	// identity check. Never fall back to InvokerName/comm.
+	callerExe := invokerExePath(senderInfo)
+	if callerExe == "" || rule.InvokerExe == "" || rule.InvokerExe != callerExe {
+		return false
+	}
+	if rule.ProcessPID != 0 {
+		if senderInfo.PID != rule.ProcessPID || readProcessStartTime(senderInfo.PID) != rule.ProcessStartTime {
+			return false
+		}
+	}
+	if rule.Process != nil && !matchProcess(rule.Process, senderInfo) {
+		return false
+	}
+	if rule.RequestType != reqType {
+		return false
+	}
+	if reqType != RequestTypeSearch && len(items) > 0 {
+		if len(rule.ItemPaths) > 0 && len(items) != len(rule.ItemPaths) {
+			return false
+		}
+		for _, item := range items {
+			if len(rule.ItemPaths) > 0 && !slices.Contains(rule.ItemPaths, item.Path) {
+				return false
+			}
+			if rule.Collection != "" && rule.Collection != extractCollection(item.Path) {
+				return false
+			}
+			attrs := map[string]string{}
+			if item.Attributes != nil {
+				attrs = item.Attributes
+			}
+			if !attributesMatch(rule.Attributes, attrs) {
+				return false
+			}
+		}
+		return true
+	}
+	if reqType != RequestTypeSearch && rule.Collection != "" {
+		return false
+	}
+	attrs := map[string]string{}
+	if reqType == RequestTypeSearch {
+		attrs = searchAttrs
+	}
+	return attributesMatch(rule.Attributes, attrs)
+}
+
 // checkAutoApproveRules checks if the request matches any active auto-approve rule.
 // Returns the matching rule or nil.
-func (m *Manager) checkAutoApproveRules(senderInfo SenderInfo, items []ItemInfo, reqType RequestType, searchAttrs map[string]string) *AutoApproveRule {
+func (m *Manager) checkAutoApproveRules(senderInfo SenderInfo, items []ItemInfo, reqType RequestType, searchAttrsOpt ...map[string]string) *AutoApproveRule {
+	var searchAttrs map[string]string
+	if len(searchAttrsOpt) > 0 {
+		searchAttrs = searchAttrsOpt[0]
+	}
 	m.autoApproveMu.Lock()
 	defer m.autoApproveMu.Unlock()
 
@@ -911,25 +1055,16 @@ func (m *Manager) checkAutoApproveRules(senderInfo SenderInfo, items []ItemInfo,
 		if rule.ExpiresAt.Before(now) {
 			continue // expired, skip
 		}
+		if rule.ProcessPID != 0 && readProcessStartTime(rule.ProcessPID) != rule.ProcessStartTime {
+			continue // exact process instance exited or PID was reused
+		}
 		active = append(active, *rule)
 
 		if match != nil {
 			continue // already found a match, just cleaning
 		}
 
-		// Match on the non-spoofable invoker exe path, never the caller's comm
-		// (InvokerName), which is attacker-controllable. Fail closed when either the
-		// rule or the caller lacks a resolved exe.
-		callerExe := invokerExePath(senderInfo)
-		if callerExe == "" || rule.InvokerExe != callerExe {
-			continue
-		}
-		// Match request type
-		if rule.RequestType != reqType {
-			continue
-		}
-		// A permissive rule may authorize a batch only when every item is in scope.
-		if !autoApproveCoversAll(rule, items) {
+		if !autoApproveRuleMatches(rule, senderInfo, items, reqType, searchAttrs) {
 			continue
 		}
 
@@ -939,30 +1074,6 @@ func (m *Manager) checkAutoApproveRules(senderInfo SenderInfo, items []ItemInfo,
 
 	m.autoApproveRules = active
 	return match
-}
-
-// autoApproveCoversAll reports whether an auto-approve rule covers every item in
-// the batch (collection and attributes). An auto-approve rule is permissive, so
-// it may only authorize a batch when all items are in scope. An empty batch is
-// covered only when the rule imposes no secret-scope constraints — the case that
-// carries the itemless gpg_sign path.
-func autoApproveCoversAll(rule *AutoApproveRule, items []ItemInfo) bool {
-	if len(items) == 0 {
-		return rule.Collection == "" && len(rule.Attributes) == 0
-	}
-	for _, it := range items {
-		if rule.Collection != "" && rule.Collection != extractCollection(it.Path) {
-			return false
-		}
-		attrs := it.Attributes
-		if attrs == nil {
-			attrs = map[string]string{}
-		}
-		if !attributesMatch(rule.Attributes, attrs) {
-			return false
-		}
-	}
-	return true
 }
 
 // attributesEqual returns true if both maps have the same keys and values.
@@ -1104,6 +1215,31 @@ func invokerExePath(s SenderInfo) string {
 		}
 	}
 	return ""
+}
+
+func readProcessStartTime(pid uint32) uint64 {
+	if pid == 0 {
+		return 0
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	text := string(data)
+	end := strings.LastIndexByte(text, ')')
+	if end < 0 || end+2 >= len(text) {
+		return 0
+	}
+	fields := strings.Fields(text[end+2:])
+	// Fields begin at stat field 3 (state); starttime is field 22.
+	if len(fields) <= 19 {
+		return 0
+	}
+	startTime, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return startTime
 }
 
 // CheckTrustRules checks if the request matches any configured trust rule.

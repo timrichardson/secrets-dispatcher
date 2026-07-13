@@ -67,6 +67,39 @@ func (r *Resolver) CreateSavedRuleFromRequest(requestID string) error {
 	return err
 }
 
+// ApproveForProcess approves this request and allows identical requests from
+// this exact PID/start-time process instance until the process exits.
+func (r *Resolver) ApproveForProcess(id string) error {
+	req := r.Manager.GetPending(id)
+	if req == nil {
+		return approval.ErrNotFound
+	}
+	ruleID, err := r.Manager.AddProcessAutoApproveRule(req)
+	if err != nil {
+		return err
+	}
+	if err := r.Approve(id); err != nil {
+		_ = r.Manager.RemoveAutoApproveRule(ruleID)
+		return err
+	}
+	return nil
+}
+
+// ApproveFor24Hours approves this request and allows identical requests from
+// the matched application for 24 hours.
+func (r *Resolver) ApproveFor24Hours(id string) error {
+	req := r.Manager.GetPending(id)
+	if req == nil {
+		return approval.ErrNotFound
+	}
+	ruleID := r.Manager.Add24HourAutoApproveRule(req)
+	if err := r.Approve(id); err != nil {
+		_ = r.Manager.RemoveAutoApproveRule(ruleID)
+		return err
+	}
+	return nil
+}
+
 // ApproveAndAutoApprove approves a pending request and creates an auto-approve
 // rule for similar future requests. For GPG signing requests, it runs the real
 // gpg binary to produce the signature before approving.
