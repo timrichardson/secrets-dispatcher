@@ -24,10 +24,11 @@ type CollectionHandler struct {
 	resolver         *SenderInfoResolver
 	upstreamNotifier UpstreamNotifier
 	slowThreshold    time.Duration
+	prompts          *promptRegistry
 }
 
 // NewCollectionHandler creates a new CollectionHandler.
-func NewCollectionHandler(localConn *dbus.Conn, sessions *SessionManager, logger *logging.Logger, approvalMgr *approval.Manager, clientName string, tracker *clientTracker, resolver *SenderInfoResolver, upstreamNotifier UpstreamNotifier, slowThreshold time.Duration) *CollectionHandler {
+func NewCollectionHandler(localConn *dbus.Conn, sessions *SessionManager, logger *logging.Logger, approvalMgr *approval.Manager, clientName string, tracker *clientTracker, resolver *SenderInfoResolver, upstreamNotifier UpstreamNotifier, slowThreshold time.Duration, prompts *promptRegistry) *CollectionHandler {
 	return &CollectionHandler{
 		localConn:        localConn,
 		sessions:         sessions,
@@ -38,6 +39,7 @@ func NewCollectionHandler(localConn *dbus.Conn, sessions *SessionManager, logger
 		resolver:         resolver,
 		upstreamNotifier: upstreamNotifier,
 		slowThreshold:    slowThreshold,
+		prompts:          prompts,
 	}
 }
 
@@ -136,6 +138,9 @@ func (c *CollectionHandler) Delete(msg dbus.Message) (dbus.ObjectPath, *dbus.Err
 		"collection": string(path),
 	}, "ok", nil)
 
+	if err := c.prompts.register(prompt, sender); err != nil {
+		return "/", dbustypes.ErrFailed(err)
+	}
 	return prompt, nil
 }
 
@@ -293,6 +298,9 @@ func (c *CollectionHandler) CreateItem(msg dbus.Message, properties map[string]d
 		"item":       string(item),
 	}, "ok", nil)
 
+	if err := c.prompts.register(prompt, sender); err != nil {
+		return "/", "/", dbustypes.ErrFailed(err)
+	}
 	return item, prompt, nil
 }
 

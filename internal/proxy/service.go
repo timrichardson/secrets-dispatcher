@@ -22,10 +22,11 @@ type Service struct {
 	resolver         *SenderInfoResolver
 	upstreamNotifier UpstreamNotifier
 	slowThreshold    time.Duration
+	prompts          *promptRegistry
 }
 
 // NewService creates a new Service handler.
-func NewService(localConn *dbus.Conn, sessions *SessionManager, logger *logging.Logger, approvalMgr *approval.Manager, clientName string, tracker *clientTracker, resolver *SenderInfoResolver, upstreamNotifier UpstreamNotifier, slowThreshold time.Duration) *Service {
+func NewService(localConn *dbus.Conn, sessions *SessionManager, logger *logging.Logger, approvalMgr *approval.Manager, clientName string, tracker *clientTracker, resolver *SenderInfoResolver, upstreamNotifier UpstreamNotifier, slowThreshold time.Duration, prompts *promptRegistry) *Service {
 	return &Service{
 		localConn:        localConn,
 		sessions:         sessions,
@@ -36,6 +37,7 @@ func NewService(localConn *dbus.Conn, sessions *SessionManager, logger *logging.
 		resolver:         resolver,
 		upstreamNotifier: upstreamNotifier,
 		slowThreshold:    slowThreshold,
+		prompts:          prompts,
 	}
 }
 
@@ -226,6 +228,9 @@ func (s *Service) Unlock(msg dbus.Message, objects []dbus.ObjectPath) ([]dbus.Ob
 
 	objStrs := objectPathsToStrings(objects)
 	s.logger.LogUnlock(context.Background(), objStrs, len(unlocked), "ok", nil)
+	if err := s.prompts.register(prompt, sender); err != nil {
+		return nil, "/", dbustypes.ErrFailed(err)
+	}
 	return unlocked, prompt, nil
 }
 
@@ -248,6 +253,9 @@ func (s *Service) Lock(msg dbus.Message, objects []dbus.ObjectPath) ([]dbus.Obje
 		return nil, "/", dbustypes.ErrFailed(err)
 	}
 
+	if err := s.prompts.register(prompt, sender); err != nil {
+		return nil, "/", dbustypes.ErrFailed(err)
+	}
 	return locked, prompt, nil
 }
 
@@ -310,6 +318,9 @@ func (s *Service) CreateCollection(msg dbus.Message, properties map[string]dbus.
 		return "/", "/", dbustypes.ErrFailed(err)
 	}
 
+	if err := s.prompts.register(prompt, sender); err != nil {
+		return "/", "/", dbustypes.ErrFailed(err)
+	}
 	return collection, prompt, nil
 }
 
