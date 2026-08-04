@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -288,6 +289,83 @@ func (h *Handlers) HandleAutoApproveDelete(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, ActionResponse{Status: "deleted"})
 }
 
+// HandleManagedTrustRuleList handles GET /api/v1/approval-rules.
+func (h *Handlers) HandleManagedTrustRuleList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rules := h.manager.ListManagedTrustRules()
+	if rules == nil {
+		rules = []approval.ManagedTrustRule{}
+	}
+	writeJSON(w, rules)
+}
+
+// HandleManagedTrustRuleCreateFromRequest handles POST /api/v1/approval-rules/from-request.
+func (h *Handlers) HandleManagedTrustRuleCreateFromRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.RequestID == "" {
+		writeError(w, "request_id is required", http.StatusBadRequest)
+		return
+	}
+
+	rule, created, err := h.manager.CreateManagedTrustRuleFromRequest(req.RequestID)
+	if err != nil {
+		switch {
+		case errors.Is(err, approval.ErrNotFound):
+			writeError(w, "approved request not found", http.StatusNotFound)
+		case errors.Is(err, approval.ErrInvalidManagedRule):
+			writeError(w, err.Error(), http.StatusUnprocessableEntity)
+		default:
+			writeError(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSONStatus(w, status, rule)
+}
+
+// HandleManagedTrustRuleDelete handles DELETE /api/v1/approval-rules/{id}.
+func (h *Handlers) HandleManagedTrustRuleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/approval-rules/")
+	if id == "" || strings.Contains(id, "/") {
+		writeError(w, "invalid rule ID", http.StatusBadRequest)
+		return
+	}
+	if err := h.manager.RemoveManagedTrustRule(id); err != nil {
+		if errors.Is(err, approval.ErrNotFound) {
+			writeError(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		writeError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, ActionResponse{Status: "deleted"})
+}
+
 // HandleLog handles GET /api/v1/log.
 func (h *Handlers) HandleLog(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -379,6 +457,14 @@ func writeJSON(w http.ResponseWriter, v any) {
 	}
 }
 
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		http.Error(w, `{"error": "failed to encode response"}`, http.StatusInternalServerError)
+	}
+}
+
 func writeError(w http.ResponseWriter, message string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -462,6 +548,7 @@ func (h *Handlers) HandleTestInjectHistory(w http.ResponseWriter, r *http.Reques
 		UID:         entry.Request.SenderInfo.UID,
 		UserName:    entry.Request.SenderInfo.UserName,
 		InvokerName: entry.Request.SenderInfo.InvokerName,
+		SystemdUnit: entry.Request.SenderInfo.SystemdUnit,
 	}
 	if len(entry.Request.SenderInfo.ProcessChain) > 0 {
 		approvalSender.ProcessChain = make([]approval.ProcessInfo, len(entry.Request.SenderInfo.ProcessChain))
