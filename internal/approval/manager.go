@@ -1219,8 +1219,9 @@ func (m *Manager) ListManagedTrustRules() []ManagedTrustRule {
 }
 
 // CreateManagedTrustRuleFromRequest creates an exact rule from a manually
-// approved get_secret history entry. Equivalent rules are returned unchanged.
-func (m *Manager) CreateManagedTrustRuleFromRequest(requestID string) (ManagedTrustRule, error) {
+// approved get_secret history entry. The bool reports whether a new rule was
+// persisted; equivalent rules are returned unchanged with false.
+func (m *Manager) CreateManagedTrustRuleFromRequest(requestID string) (ManagedTrustRule, bool, error) {
 	m.historyMu.RLock()
 	var generated ManagedTrustRule
 	var err error
@@ -1240,17 +1241,17 @@ func (m *Manager) CreateManagedTrustRuleFromRequest(requestID string) (ManagedTr
 	}
 	m.historyMu.RUnlock()
 	if !found {
-		return ManagedTrustRule{}, ErrNotFound
+		return ManagedTrustRule{}, false, ErrNotFound
 	}
 	if err != nil {
-		return ManagedTrustRule{}, err
+		return ManagedTrustRule{}, false, err
 	}
 
 	m.managedRulesMu.Lock()
 	for _, existing := range m.managedRules {
 		if managedTrustRulesEqual(existing, generated) {
 			m.managedRulesMu.Unlock()
-			return cloneManagedTrustRule(existing), nil
+			return cloneManagedTrustRule(existing), false, nil
 		}
 	}
 	updated := cloneManagedTrustRules(m.managedRules)
@@ -1258,7 +1259,7 @@ func (m *Manager) CreateManagedTrustRuleFromRequest(requestID string) (ManagedTr
 	if m.managedStore != nil {
 		if err := m.managedStore.Save(updated); err != nil {
 			m.managedRulesMu.Unlock()
-			return ManagedTrustRule{}, err
+			return ManagedTrustRule{}, false, err
 		}
 	}
 	m.managedRules = updated
@@ -1267,7 +1268,7 @@ func (m *Manager) CreateManagedTrustRuleFromRequest(requestID string) (ManagedTr
 	result := cloneManagedTrustRule(generated)
 	m.notify(Event{Type: EventManagedTrustRuleAdded, ManagedRule: &result})
 	slog.Info("managed trust rule added", "rule_id", result.ID, "rule_name", result.Name)
-	return result, nil
+	return result, true, nil
 }
 
 // RemoveManagedTrustRule deletes a managed rule after successfully persisting the change.

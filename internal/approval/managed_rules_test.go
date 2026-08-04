@@ -245,7 +245,7 @@ func TestManagerManagedRulesPersistBeforeMemoryAndEvents(t *testing.T) {
 	observer := &testObserver{}
 	mgr.Subscribe(observer)
 
-	_, err := mgr.CreateManagedTrustRuleFromRequest("approved-request")
+	_, _, err := mgr.CreateManagedTrustRuleFromRequest("approved-request")
 	require.ErrorIs(t, err, storeErr)
 	assert.Empty(t, mgr.ListManagedTrustRules())
 	assert.Empty(t, observer.Events())
@@ -267,8 +267,9 @@ func TestManagerManagedRuleLifecycleAndAttribution(t *testing.T) {
 	req := managedRuleRequest("/usr/bin/gh")
 	mgr.AddHistoryEntry(HistoryEntry{Request: req, Resolution: ResolutionApproved})
 
-	rule, err := mgr.CreateManagedTrustRuleFromRequest(req.ID)
+	rule, created, err := mgr.CreateManagedTrustRuleFromRequest(req.ID)
 	require.NoError(t, err)
+	assert.True(t, created)
 	require.Len(t, store.saved, 1)
 	require.Len(t, mgr.ListManagedTrustRules(), 1)
 
@@ -297,7 +298,7 @@ func TestManagerManagedRuleMatchesAfterStoreReload(t *testing.T) {
 	mgr := NewManager(ManagerConfig{Timeout: time.Second, HistoryMax: 10, ManagedRuleStore: store})
 	req := managedRuleRequest("/usr/bin/gh")
 	mgr.AddHistoryEntry(HistoryEntry{Request: req, Resolution: ResolutionApproved})
-	_, err := mgr.CreateManagedTrustRuleFromRequest(req.ID)
+	_, _, err := mgr.CreateManagedTrustRuleFromRequest(req.ID)
 	require.NoError(t, err)
 
 	loaded, err := store.Load()
@@ -312,7 +313,7 @@ func TestCreateManagedTrustRuleRequiresManualApproval(t *testing.T) {
 	mgr := NewManager(ManagerConfig{HistoryMax: 10})
 	req := managedRuleRequest("/usr/bin/gh")
 	mgr.AddHistoryEntry(HistoryEntry{Request: req, Resolution: ResolutionAutoApproved})
-	_, err := mgr.CreateManagedTrustRuleFromRequest(req.ID)
+	_, _, err := mgr.CreateManagedTrustRuleFromRequest(req.ID)
 	require.ErrorIs(t, err, ErrInvalidManagedRule)
 }
 
