@@ -108,17 +108,24 @@ func (r *SenderInfoResolver) Resolve(sender senderName) approval.SenderInfo {
 					continue
 				}
 				info.ProcessChain = append(info.ProcessChain, approval.ProcessInfo{
-					Name: entry.Comm,
-					PID:  uint32(entry.PID),
-					Exe:  entry.Exe,
-					Args: entry.Args,
-					CWD:  entry.CWD,
+					Name:       entry.Comm,
+					PID:        uint32(entry.PID),
+					Exe:        entry.Exe,
+					Args:       entry.Args,
+					CWD:        entry.CWD,
+					LSMContext: entry.LSMContext,
 				})
 			}
 			// Resolve invoker (skip shells) for the display InvokerName (comm).
 			comm, invokerPID := procutil.ResolveInvoker(info.PID)
 			info.InvokerName = comm
 			info.PID = invokerPID
+
+			// Extract the security label from the direct caller's LSM context.
+			// This is the kernel-enforced application identity (AppArmor/SELinux).
+			// Use the resolved invoker PID if present in the chain, otherwise
+			// fall back to the first entry in the chain.
+			info.SecurityLabel = securityLabelFromChain(info.ProcessChain, invokerPID)
 		} else {
 			// No /proc chain (e.g. remote/tunneled caller): use the systemd unit
 			// as the display name too.
@@ -127,6 +134,21 @@ func (r *SenderInfoResolver) Resolve(sender senderName) approval.SenderInfo {
 	}
 
 	return info
+}
+
+// securityLabelFromChain extracts the normalised LSM label for the given PID
+// from the process chain. Falls back to the first entry if the PID is not
+// found. Returns empty string when no LSM context is available.
+func securityLabelFromChain(chain []approval.ProcessInfo, pid uint32) string {
+	for _, p := range chain {
+		if p.PID == pid && p.LSMContext != "" {
+			return procutil.ParseLSMLabel(p.LSMContext)
+		}
+	}
+	if len(chain) > 0 && chain[0].LSMContext != "" {
+		return procutil.ParseLSMLabel(chain[0].LSMContext)
+	}
+	return ""
 }
 
 // realDBusClient implements dbusClient using a real D-Bus connection.

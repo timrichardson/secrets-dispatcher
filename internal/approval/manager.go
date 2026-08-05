@@ -1165,7 +1165,7 @@ func matchTrustRule(rule *TrustRule, senderInfo SenderInfo, items []ItemInfo, re
 // At least one non-empty field must be set, and all non-empty fields must match.
 func matchProcess(pm *ProcessMatcher, senderInfo SenderInfo) bool {
 	if pm.Direct {
-		hasProcessFields := pm.Exe != "" || pm.Name != "" || pm.Args != "" || pm.CWD != ""
+		hasProcessFields := pm.Exe != "" || pm.Name != "" || pm.Args != "" || pm.CWD != "" || pm.LSMContext != ""
 		if hasProcessFields {
 			if len(senderInfo.ProcessChain) == 0 || !matchProcessEntry(pm, senderInfo.ProcessChain[0]) {
 				return false
@@ -1247,6 +1247,26 @@ func matchProcess(pm *ProcessMatcher, senderInfo SenderInfo) bool {
 		}
 	}
 
+	if pm.LSMContext != "" {
+		// Match the normalised security label of the direct caller first, then
+		// fall back to searching the raw LSM context of any process in the chain.
+		if senderInfo.SecurityLabel != "" {
+			if ok, _ := path.Match(pm.LSMContext, senderInfo.SecurityLabel); ok {
+				return true
+			}
+		}
+		matched := false
+		for _, proc := range senderInfo.ProcessChain {
+			if ok, _ := path.Match(pm.LSMContext, proc.LSMContext); ok {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -1272,6 +1292,11 @@ func matchProcessEntry(pm *ProcessMatcher, proc ProcessInfo) bool {
 	}
 	if pm.CWD != "" {
 		if ok, _ := path.Match(pm.CWD, proc.CWD); !ok {
+			return false
+		}
+	}
+	if pm.LSMContext != "" {
+		if ok, _ := path.Match(pm.LSMContext, proc.LSMContext); !ok {
 			return false
 		}
 	}

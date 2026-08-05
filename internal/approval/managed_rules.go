@@ -280,6 +280,7 @@ func ValidateManagedTrustRule(rule *ManagedTrustRule) error {
 		value string
 	}{
 		{"process.exe", rule.Process.Exe},
+		{"process.lsm_context", rule.Process.LSMContext},
 		{"process.args", rule.Process.Args},
 		{"process.cwd", rule.Process.CWD},
 		{"secret.collection", rule.Secret.Collection},
@@ -348,6 +349,12 @@ func managedTrustRuleFromRequest(req *Request) (ManagedTrustRule, error) {
 	}
 
 	process := &ProcessMatcher{Exe: globQuote(direct.Exe), Direct: true}
+	// When the caller has an LSM security label, include it in the saved rule.
+	// This strengthens the match: a process with the same exe path but a
+	// different (or absent) LSM label will not match, preventing substitution.
+	if direct.LSMContext != "" {
+		process.LSMContext = globQuote(direct.LSMContext)
+	}
 	if isInterpreter(direct.Exe) {
 		script, err := interpreterScriptArg(direct.Args)
 		if err != nil {

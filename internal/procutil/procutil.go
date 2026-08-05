@@ -72,11 +72,12 @@ func IsSessionLeader(pid int32) bool {
 
 // ProcEntry represents a single process in the process chain.
 type ProcEntry struct {
-	Comm string
-	PID  int32
-	Exe  string   // readlink /proc/PID/exe
-	Args []string // /proc/PID/cmdline
-	CWD  string   // readlink /proc/PID/cwd
+	Comm       string
+	PID        int32
+	Exe        string   // readlink /proc/PID/exe
+	Args       []string // /proc/PID/cmdline
+	CWD        string   // readlink /proc/PID/cwd
+	LSMContext string   // /proc/PID/attr/current — kernel-enforced LSM label (AppArmor/SELinux)
 }
 
 // ReadExe reads the executable path from /proc/<pid>/exe.
@@ -101,6 +102,80 @@ func ReadCWD(pid int32) string {
 	return target
 }
 
+// ReadLSMContext reads the kernel LSM security context for a process from
+// /proc/<pid>/attr/current. This is the same interface used by both AppArmor
+// and SELinux. Returns the raw label string and empty string on error or when
+// no LSM is active.
+//
+// Example outputs:
+//   - AppArmor: "snap.firefox.firefox (enforce)", "hermes (enforce)", "unconfined"
+//   - SELinux:  "unconfined_u:unconfined_r:unconfined_t:s0",
+//                "system_u:system_r:httpd_t:s0:c123,c456"
+func ReadLSMContext(pid int32) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/attr/current", pid))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// ParseLSMLabel extracts a normalised application label from a raw LSM context
+// string read by ReadLSMContext. The label is the part that identifies the
+// application profile or domain, stripped of mode/level metadata:
+//
+//   - AppArmor: returns the profile name without the mode suffix.
+//     "snap.firefox.firefox (enforce)" → "snap.firefox.firefox"
+//     "hermes (enforce)"              → "hermes"
+//     "unconfined"                    → "" (no meaningful label)
+//   - SELinux: returns the type component (the "_t" part).
+//     "system_u:system_r:httpd_t:s0" → "httpd_t"
+//     "unconfined_u:unconfined_r:unconfined_t:s0" → "" (no meaningful label)
+//
+// Returns empty string for empty input, "unconfined", or contexts where no
+// meaningful application label can be extracted.
+func ParseLSMLabel(ctx string) string {
+	ctx = strings.TrimSpace(ctx)
+	if ctx == "" || ctx == "unconfined" {
+		return ""
+	}
+
+	// AppArmor format: "profile_name (mode)" or "profile_name"
+	// AppArmor profile names use dots and may contain namespaces.
+	if i := strings.IndexByte(ctx, '('); i > 0 {
+		label := strings.TrimSpace(ctx[:i])
+		// "unconfined" without a mode suffix was handled above, but
+		// "unconfined (not a profile)" type strings may appear.
+		if label == "unconfined" {
+			return ""
+		}
+		return label
+	}
+
+	// No parenthesis — could be AppArmor without mode, or SELinux.
+	// SELinux format: "user:role:type:level" — extract the type (_t suffix).
+	if strings.Contains(ctx, ":") {
+		parts := strings.Split(ctx, ":")
+		for _, part := range parts {
+			if strings.HasSuffix(part, "_t") {
+				if part == "unconfined_t" {
+					return ""
+				}
+				return part
+			}
+		}
+		return ""
+	}
+
+	// AppArmor label without mode suffix and not "unconfined"
+	return ctx
+}
+
+// IsLSMLabelled reports whether a raw LSM context string represents a
+// meaningfully labelled process — i.e. not unconfined, not empty.
+func IsLSMLabelled(ctx string) bool {
+	return ParseLSMLabel(ctx) != ""
+}
+
 // ReadProcessChain walks from pid up to (but not including) PID 1,
 // returning the process chain. When trimAtSessionLeader is true, the
 // walk stops after including the first session leader encountered
@@ -113,11 +188,12 @@ func ReadProcessChain(pid int32, trimAtSessionLeader bool) []ProcEntry {
 			break
 		}
 		chain = append(chain, ProcEntry{
-			Comm: comm,
-			PID:  p,
-			Exe:  ReadExe(p),
-			Args: ReadCmdline(p),
-			CWD:  ReadCWD(p),
+			Comm:       comm,
+			PID:        p,
+			Exe:        ReadExe(p),
+			Args:       ReadCmdline(p),
+			CWD:        ReadCWD(p),
+			LSMContext: ReadLSMContext(p),
 		})
 		if trimAtSessionLeader && IsSessionLeader(p) {
 			// Include the parent of the session leader to show
@@ -127,11 +203,12 @@ func ReadProcessChain(pid int32, trimAtSessionLeader bool) []ProcEntry {
 				pcomm := ReadComm(parent)
 				if pcomm != "" {
 					chain = append(chain, ProcEntry{
-						Comm: pcomm,
-						PID:  parent,
-						Exe:  ReadExe(parent),
-						Args: ReadCmdline(parent),
-						CWD:  ReadCWD(parent),
+						Comm:       pcomm,
+						PID:        parent,
+						Exe:        ReadExe(parent),
+						Args:       ReadCmdline(parent),
+						CWD:        ReadCWD(parent),
+						LSMContext: ReadLSMContext(parent),
 					})
 				}
 			}
