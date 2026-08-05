@@ -115,6 +115,22 @@ test.describe("Focus Mode — Basic Display", () => {
     await denyRequest(reqId);
   });
 
+  test("shows a link back to the dashboard", async ({ page }) => {
+    const reqId = await createRequest({ commit_msg: "feat: dashboard link" });
+
+    await openFocused(page, reqId);
+
+    const dashboardLink = page.getByRole("link", { name: "Back to dashboard" });
+    await expect(dashboardLink).toBeVisible();
+    await expect(dashboardLink).toHaveAttribute("href", "/");
+
+    await dashboardLink.click();
+    await expect(page).toHaveURL(`${backend.url}/`);
+    await expect(page.getByText("Pending Requests (1)")).toBeVisible();
+
+    await denyRequest(reqId);
+  });
+
   test("hides sidebar and header actions", async ({ page }) => {
     const reqId = await createRequest();
 

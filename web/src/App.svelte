@@ -437,6 +437,9 @@
           </svg>
         </a>
       </div>
+      {#if authState === "authenticated" && focusRequestId}
+        <a class="focus-home-link" href="/" aria-label="Back to dashboard">← Back to dashboard</a>
+      {/if}
       {#if authState === "authenticated" && !focusRequestId}
         <div class="header-actions">
           <div class="status-indicator">
@@ -775,6 +778,21 @@
 
   .github-link:hover {
     color: var(--color-text);
+  }
+
+  .focus-home-link {
+    color: var(--color-primary);
+    font-size: 13px;
+    font-weight: 500;
+    text-decoration: none;
+    padding: 6px 10px;
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius-sm);
+    transition: background-color 0.2s;
+  }
+
+  .focus-home-link:hover {
+    background-color: rgba(59, 130, 246, 0.1);
   }
 
   h2 {
