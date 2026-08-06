@@ -49,13 +49,15 @@ function bitwardenRequest(id: string) {
 }
 
 function gpgRequest(id: string, kind: "tag" | "push") {
-  const now = new Date().toISOString();
+  const createdAt = kind === "tag"
+    ? "2026-08-04T12:00:01.000Z"
+    : "2026-08-04T12:00:00.000Z";
   return {
     id,
     client: "gpg-sign",
     items: [],
     session: "",
-    created_at: now,
+    created_at: createdAt,
     expires_at: new Date(Date.now() + 300_000).toISOString(),
     type: "gpg_sign",
     sender_info: {

@@ -110,7 +110,7 @@ func ReadCWD(pid int32) string {
 // Example outputs:
 //   - AppArmor: "snap.firefox.firefox (enforce)", "hermes (enforce)", "unconfined"
 //   - SELinux:  "unconfined_u:unconfined_r:unconfined_t:s0",
-//                "system_u:system_r:httpd_t:s0:c123,c456"
+//     "system_u:system_r:httpd_t:s0:c123,c456"
 func ReadLSMContext(pid int32) string {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/attr/current", pid))
 	if err != nil {
