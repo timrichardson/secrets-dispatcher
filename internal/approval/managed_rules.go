@@ -1,10 +1,12 @@
 package approval
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -48,6 +50,23 @@ type managedRuleFile struct {
 	Rules   []ManagedTrustRule `json:"rules"`
 }
 
+type legacyManagedRuleFile struct {
+	Version int                 `json:"version"`
+	Rules   []legacyManagedRule `json:"rules"`
+}
+
+type legacyManagedRule struct {
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	Enabled          bool              `json:"enabled"`
+	RequestTypes     []string          `json:"request_types"`
+	Process          *ProcessMatcher   `json:"process,omitempty"`
+	Secret           *SecretMatcher    `json:"secret,omitempty"`
+	SearchAttributes map[string]string `json:"search_attributes,omitempty"`
+	CreatedAt        time.Time         `json:"created_at"`
+	UpdatedAt        time.Time         `json:"updated_at"`
+}
+
 // NewFileManagedTrustRuleStore creates a versioned JSON rule store.
 func NewFileManagedTrustRuleStore(stateDir string) *FileManagedTrustRuleStore {
 	return &FileManagedTrustRuleStore{path: filepath.Join(stateDir, "approval-rules.json")}
@@ -82,14 +101,21 @@ func (s *FileManagedTrustRuleStore) Load() ([]ManagedTrustRule, error) {
 	}
 	defer f.Close()
 
-	dec := json.NewDecoder(io.LimitReader(f, managedRuleFileMaxSize+1))
-	dec.DisallowUnknownFields()
-	var file managedRuleFile
-	if err := dec.Decode(&file); err != nil {
-		return nil, fmt.Errorf("decode managed rule file: %w", err)
-	}
-	if err := ensureJSONEOF(dec); err != nil {
+	data, err := io.ReadAll(io.LimitReader(f, managedRuleFileMaxSize+1))
+	if err != nil {
 		return nil, err
+	}
+	if len(data) > managedRuleFileMaxSize {
+		return nil, fmt.Errorf("managed rule file exceeds %d bytes", managedRuleFileMaxSize)
+	}
+
+	var file managedRuleFile
+	if err := decodeManagedRuleJSON(data, &file); err != nil {
+		migrated, migrateErr := s.migrateLegacy(data)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("decode managed rule file: %w", err)
+		}
+		return migrated, nil
 	}
 	if file.Version != managedRuleFileVersion {
 		return nil, fmt.Errorf("unsupported managed rule file version %d", file.Version)
@@ -98,6 +124,104 @@ func (s *FileManagedTrustRuleStore) Load() ([]ManagedTrustRule, error) {
 		return nil, err
 	}
 	return cloneManagedTrustRules(file.Rules), nil
+}
+
+func decodeManagedRuleJSON(data []byte, target any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(target); err != nil {
+		return err
+	}
+	return ensureJSONEOF(dec)
+}
+
+func (s *FileManagedTrustRuleStore) migrateLegacy(data []byte) ([]ManagedTrustRule, error) {
+	var legacy legacyManagedRuleFile
+	if err := decodeManagedRuleJSON(data, &legacy); err != nil {
+		return nil, err
+	}
+	if legacy.Version != managedRuleFileVersion {
+		return nil, fmt.Errorf("unsupported legacy managed rule file version %d", legacy.Version)
+	}
+
+	migrated := make([]ManagedTrustRule, 0, len(legacy.Rules))
+	dropped := 0
+	for _, rule := range legacy.Rules {
+		converted, err := migrateLegacyManagedRule(rule)
+		if err != nil {
+			dropped++
+			continue
+		}
+		migrated = append(migrated, converted)
+	}
+	if err := validateManagedRules(migrated); err != nil {
+		return nil, err
+	}
+
+	backupPath := s.path + ".legacy-v1"
+	if err := preserveLegacyRuleFile(s.path, backupPath); err != nil {
+		return nil, err
+	}
+	if err := s.Save(migrated); err != nil {
+		return nil, err
+	}
+	slog.Warn("migrated legacy approval rules",
+		"migrated", len(migrated),
+		"unsupported", dropped,
+		"backup", backupPath)
+	return cloneManagedTrustRules(migrated), nil
+}
+
+func migrateLegacyManagedRule(rule legacyManagedRule) (ManagedTrustRule, error) {
+	if !rule.Enabled {
+		return ManagedTrustRule{}, errors.New("disabled legacy rule")
+	}
+	if len(rule.RequestTypes) != 1 || rule.RequestTypes[0] != string(RequestTypeGetSecret) {
+		return ManagedTrustRule{}, errors.New("unsupported legacy request type")
+	}
+	if rule.Process == nil || rule.Process.Exe == "" || !filepath.IsAbs(rule.Process.Exe) {
+		return ManagedTrustRule{}, errors.New("legacy rule has no absolute executable")
+	}
+	if rule.Process.Name != "" || rule.Process.Unit != "" {
+		return ManagedTrustRule{}, errors.New("legacy process name and unit matchers are unsupported")
+	}
+	if rule.Secret == nil || rule.Secret.Collection == "" || len(rule.Secret.Attributes) == 0 {
+		return ManagedTrustRule{}, errors.New("legacy rule has no exact secret attributes")
+	}
+	if len(rule.SearchAttributes) != 0 {
+		return ManagedTrustRule{}, errors.New("legacy search attributes are unsupported")
+	}
+
+	process := *rule.Process
+	process.Direct = true
+	converted := ManagedTrustRule{
+		ID:        rule.ID,
+		CreatedAt: rule.CreatedAt,
+		TrustRule: TrustRule{
+			Name:         rule.Name,
+			Action:       "approve",
+			RequestTypes: slices.Clone(rule.RequestTypes),
+			Process:      &process,
+			Secret:       rule.Secret,
+		},
+	}
+	if err := ValidateManagedTrustRule(&converted); err != nil {
+		return ManagedTrustRule{}, err
+	}
+	return converted, nil
+}
+
+func preserveLegacyRuleFile(source, backup string) error {
+	if err := os.Link(source, backup); err == nil {
+		return nil
+	} else if !os.IsExist(err) {
+		return fmt.Errorf("back up legacy managed rule file: %w", err)
+	}
+	info, err := os.Lstat(backup)
+	if err != nil {
+		return err
+	}
+	return validatePrivateRegularFile(backup, info)
 }
 
 // Save atomically replaces the managed rule file with private permissions.

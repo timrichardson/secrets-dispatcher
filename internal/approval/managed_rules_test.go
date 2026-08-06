@@ -73,6 +73,54 @@ func TestFileManagedTrustRuleStoreMissingFile(t *testing.T) {
 	assert.Empty(t, rules)
 }
 
+func TestFileManagedTrustRuleStoreMigratesLegacyRules(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	file := filepath.Join(dir, "approval-rules.json")
+	legacy := `{
+  "version": 1,
+  "rules": [
+    {
+      "id": "7aed3d0a-b610-4dff-88a1-cf6fd80491ca",
+      "name": "gh get_secret",
+      "enabled": true,
+      "request_types": ["get_secret"],
+      "process": {"exe": "/usr/bin/gh"},
+      "secret": {"collection": "login", "attributes": {"service": "github"}},
+      "created_at": "2026-06-16T12:00:18Z",
+      "updated_at": "2026-06-16T12:00:18Z"
+    },
+    {
+      "id": "a5961a29-b8d4-4b19-bcd1-be02821b997b",
+      "name": "unsupported search",
+      "enabled": true,
+      "request_types": ["search"],
+      "process": {"exe": "/usr/bin/gh"},
+      "search_attributes": {"service": "github"},
+      "created_at": "2026-06-16T12:00:18Z",
+      "updated_at": "2026-06-16T12:00:18Z"
+    }
+  ]
+}`
+	require.NoError(t, os.WriteFile(file, []byte(legacy), 0o600))
+
+	store := NewFileManagedTrustRuleStore(dir)
+	rules, err := store.Load()
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+	assert.Equal(t, "gh get_secret", rules[0].Name)
+	assert.Equal(t, "approve", rules[0].Action)
+	assert.True(t, rules[0].Process.Direct)
+
+	backup, err := os.ReadFile(file + ".legacy-v1")
+	require.NoError(t, err)
+	assert.Equal(t, legacy, string(backup))
+
+	reloaded, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, rules, reloaded)
+}
+
 func TestFileManagedTrustRuleStoreRejectsUnsafeFiles(t *testing.T) {
 	t.Run("unknown field", func(t *testing.T) {
 		dir := t.TempDir()
