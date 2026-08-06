@@ -192,7 +192,7 @@ func TestHandler_OnEvent_RequestCreated_Actions(t *testing.T) {
 	h.OnEvent(approval.Event{Type: approval.EventRequestCreated, Request: req})
 
 	call := mock.lastNotify()
-	wantActions := []string{"default", "", "approve", "Approve once", "approve_and_auto_approve", "Approve 2m", "deny", "Deny", "details", "Details"}
+	wantActions := []string{"approve", "Approve once", "deny", "Deny", "details", "Admin..."}
 	if len(call.actions) != len(wantActions) {
 		t.Fatalf("expected %d actions, got %d: %v", len(wantActions), len(call.actions), call.actions)
 	}
@@ -778,6 +778,9 @@ func TestHandler_DetailsOpensAndReissuesPendingNotification(t *testing.T) {
 	h, mock, approver := newTestHandler()
 	opened := make(chan string, 1)
 	h.openURL = func(u string) { opened <- u }
+	h.SetRequestURLBuilder(func(requestID string) (string, error) {
+		return "http://127.0.0.1:8484/?request=" + requestID + "&token=single-use", nil
+	})
 	req := &approval.Request{
 		ID:     "details-1",
 		Client: "client",
@@ -790,7 +793,7 @@ func TestHandler_DetailsOpensAndReissuesPendingNotification(t *testing.T) {
 
 	select {
 	case url := <-opened:
-		assert.Equal(t, "http://127.0.0.1:8484?request=details-1", url)
+		assert.Equal(t, "http://127.0.0.1:8484/?request=details-1&token=single-use", url)
 	case <-time.After(time.Second):
 		t.Fatal("details did not open the focused request")
 	}

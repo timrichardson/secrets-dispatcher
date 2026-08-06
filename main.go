@@ -452,6 +452,11 @@ func runServe(args []string) {
 		fmt.Fprintf(os.Stderr, "error creating auth: %v\n", err)
 		os.Exit(1)
 	}
+	if notifHandler != nil {
+		notifHandler.SetRequestURLBuilder(func(requestID string) (string, error) {
+			return auth.GenerateRequestURL(*listenAddr, requestID)
+		})
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

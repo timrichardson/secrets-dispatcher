@@ -358,6 +358,7 @@ type Handler struct {
 	autoApproveDuration time.Duration
 	notificationDelay   time.Duration
 	openURL             func(string) // injectable for testing; defaults to xdg-open
+	requestURL          func(string) (string, error)
 
 	mu            sync.Mutex
 	notifications map[string]uint32 // request ID -> notification ID
@@ -368,6 +369,12 @@ type Handler struct {
 	// cancelledRequests stores recently cancelled requests for auto-approve lookup.
 	// Keys are request IDs, values expire after 5 minutes.
 	cancelledRequests map[string]cancelledEntry
+}
+
+// SetRequestURLBuilder configures authenticated URLs for notification actions.
+// It must be called during startup, before ListenActions begins processing.
+func (h *Handler) SetRequestURLBuilder(builder func(string) (string, error)) {
+	h.requestURL = builder
 }
 
 type cancelledEntry struct {
@@ -476,7 +483,18 @@ func (h *Handler) handleDetails(notificationID uint32) {
 		return
 	}
 
-	h.openURL(h.baseURL + "?request=" + reqID)
+	targetURL := h.baseURL + "?request=" + reqID
+	if h.requestURL != nil {
+		var err error
+		targetURL, err = h.requestURL(reqID)
+		if err != nil {
+			slog.Error("failed to create authenticated request URL", "error", err, "request_id", reqID)
+		} else {
+			h.openURL(targetURL)
+		}
+	} else {
+		h.openURL(targetURL)
+	}
 
 	// GNOME dismisses a notification after invoking any action. Reissue the
 	// still-pending request after the action completes so approval remains
@@ -551,17 +569,17 @@ func formatDurationShort(d time.Duration) string {
 }
 
 func (h *Handler) approvalActions() []string {
+	// GNOME Shell displays at most three explicit actions. Keep Admin in the
+	// visible set rather than displacing it with the timed approval shortcut.
 	return []string{
-		"default", "",
 		"approve", "Approve once",
-		"approve_and_auto_approve", "Approve " + formatDurationShort(h.autoApproveDuration),
 		"deny", "Deny",
-		"details", "Details",
+		"details", "Admin...",
 	}
 }
 
 func detailsHint() string {
-	return " • Select Details for full request information"
+	return " • Select Admin... for full request information"
 }
 
 func (h *Handler) handleCreated(req *approval.Request) {
