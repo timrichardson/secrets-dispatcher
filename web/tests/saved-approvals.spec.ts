@@ -186,7 +186,9 @@ test.describe("Saved approvals", () => {
     await page.getByRole("button", { name: "Save exact approval" }).click();
     expect(requestBody).toEqual({ request_id: "eligible-1" });
     await expect(page.getByText("Saved Approvals (1)")).toBeVisible();
-    const revokeButton = page.getByRole("button", { name: "Revoke saved rule" });
+    const revokeButton = page.getByRole("button", {
+      name: "Revoke saved rule",
+    });
     await expect(revokeButton).toBeVisible();
 
     await revokeButton.click();
