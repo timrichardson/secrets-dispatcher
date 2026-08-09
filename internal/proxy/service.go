@@ -124,6 +124,14 @@ func (s *Service) SearchItems(msg dbus.Message, attributes map[string]string) ([
 // GetSecrets retrieves secrets for multiple items.
 // Signature: GetSecrets(items Array<ObjectPath>, session ObjectPath) -> (secrets Dict<ObjectPath,Secret>)
 func (s *Service) GetSecrets(msg dbus.Message, items []dbus.ObjectPath, session dbus.ObjectPath) (map[dbus.ObjectPath]dbustypes.Secret, *dbus.Error) {
+	itemStrs := objectPathsToStrings(items)
+	localSession, ok := s.sessions.GetLocalSession(session)
+	if !ok {
+		err := dbustypes.ErrSessionNotFound(string(session))
+		s.logger.LogGetSecrets(context.Background(), itemStrs, "error", err)
+		return nil, err
+	}
+
 	// Fetch item info (label + attributes) for each item
 	sender := senderOf(msg)
 	senderCtx := UpstreamCallContext{
@@ -142,18 +150,10 @@ func (s *Service) GetSecrets(msg dbus.Message, items []dbus.ObjectPath, session 
 	senderInfo := s.resolver.Resolve(sender)
 
 	// Require approval before accessing secrets
-	itemStrs := objectPathsToStrings(items)
 	_, err := s.approval.RequireApproval(ctx, s.clientName, itemInfos, string(session), approval.RequestTypeGetSecret, nil, senderInfo)
 	if err != nil {
 		s.logger.LogGetSecrets(ctx, itemStrs, "denied", err)
 		return nil, dbustypes.ErrAccessDenied(err.Error())
-	}
-
-	// Map remote session to local session
-	localSession, ok := s.sessions.GetLocalSession(session)
-	if !ok {
-		s.logger.LogGetSecrets(context.Background(), itemStrs, "error", dbustypes.ErrSessionNotFound(string(session)))
-		return nil, dbustypes.ErrSessionNotFound(string(session))
 	}
 
 	obj := s.upstream(dbustypes.ServicePath)

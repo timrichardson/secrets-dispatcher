@@ -146,6 +146,12 @@ func (i *ItemHandler) GetSecret(msg dbus.Message, session dbus.ObjectPath) (dbus
 	if !isItemPath(path) {
 		return dbustypes.Secret{}, dbustypes.ErrObjectNotFound(string(path))
 	}
+	localSession, ok := i.sessions.GetLocalSession(session)
+	if !ok {
+		err := dbustypes.ErrSessionNotFound(string(session))
+		i.logger.LogItemGetSecret(context.Background(), string(path), "error", err)
+		return dbustypes.Secret{}, err
+	}
 
 	// Fetch item info (label + attributes)
 	sender := senderOf(msg)
@@ -167,13 +173,6 @@ func (i *ItemHandler) GetSecret(msg dbus.Message, session dbus.ObjectPath) (dbus
 	if err != nil {
 		i.logger.LogItemGetSecret(ctx, string(path), "denied", err)
 		return dbustypes.Secret{}, dbustypes.ErrAccessDenied(err.Error())
-	}
-
-	// Map remote session to local session
-	localSession, ok := i.sessions.GetLocalSession(session)
-	if !ok {
-		i.logger.LogItemGetSecret(context.Background(), string(path), "error", dbustypes.ErrSessionNotFound(string(session)))
-		return dbustypes.Secret{}, dbustypes.ErrSessionNotFound(string(session))
 	}
 
 	obj := i.upstream(path)
@@ -211,6 +210,11 @@ func (i *ItemHandler) SetSecret(msg dbus.Message, secret dbustypes.Secret) *dbus
 	if !isItemPath(path) {
 		return dbustypes.ErrObjectNotFound(string(path))
 	}
+	if _, ok := i.sessions.GetLocalSession(secret.Session); !ok {
+		err := dbustypes.ErrSessionNotFound(string(secret.Session))
+		i.logger.LogMethod(context.Background(), "Item.SetSecret", map[string]any{"item": string(path)}, "error", err)
+		return err
+	}
 
 	// Fetch item info (label + attributes)
 	sender := senderOf(msg)
@@ -243,7 +247,9 @@ func (i *ItemHandler) SetSecret(msg dbus.Message, secret dbustypes.Secret) *dbus
 	// DH sessions before forwarding it to the (plain) upstream service.
 	localSecret, ok, err := i.sessions.ForUpstream(secret)
 	if !ok {
-		return dbustypes.ErrSessionNotFound(string(secret.Session))
+		err := dbustypes.ErrSessionNotFound(string(secret.Session))
+		i.logger.LogMethod(ctx, "Item.SetSecret", map[string]any{"item": string(path)}, "error", err)
+		return err
 	}
 	if err != nil {
 		i.logger.LogMethod(ctx, "Item.SetSecret", map[string]any{"item": string(path)}, "error", err)

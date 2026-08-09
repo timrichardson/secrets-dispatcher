@@ -853,7 +853,7 @@
                 <li class="rule-entry">
                   <div class="rule-header">
                     <span class="history-type history-type--{(rule.request_types ?? [])[0] ?? 'get_secret'}">
-                      {#if (rule.action ?? 'approve') === 'ignore'}Ignore{:else}Approve{/if}
+                      {#if (rule.action ?? 'approve') === 'ignore'}Ignore{:else if rule.action === 'deny'}Deny{:else}Approve{/if}
                       {#if rule.request_types?.length}{rule.request_types.map(t => t === 'get_secret' ? 'Secret' : t === 'ssh_sign' ? 'SSH Sign' : t.charAt(0).toUpperCase() + t.slice(1)).join(', ')}{:else}All{/if}
                     </span>
                     <span class="rule-permanent">config</span>

@@ -137,7 +137,7 @@ test.describe("Trust Rules WebSocket", () => {
                 },
                 {
                   name: "Rule Two",
-                  action: "ignore",
+                  action: "deny",
                   request_types: ["write"],
                   process: { exe: "/opt/google/chrome/chrome" },
                 },
@@ -160,6 +160,7 @@ test.describe("Trust Rules WebSocket", () => {
 
     await expect(page.getByText("Rule One")).toBeVisible();
     await expect(page.getByText("Rule Two")).toBeVisible();
+    await expect(page.getByText("Deny Write")).toBeVisible();
   });
 
   test("trust rules section hidden when no rules", async ({ page }) => {

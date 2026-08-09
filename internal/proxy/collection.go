@@ -228,6 +228,11 @@ func (c *CollectionHandler) CreateItem(msg dbus.Message, properties map[string]d
 	if !isCollectionPath(path) {
 		return "/", "/", dbustypes.ErrObjectNotFound(string(path))
 	}
+	if _, ok := c.sessions.GetLocalSession(secret.Session); !ok {
+		err := dbustypes.ErrSessionNotFound(string(secret.Session))
+		c.logger.LogMethod(context.Background(), "Collection.CreateItem", map[string]any{"collection": string(path)}, "error", err)
+		return "/", "/", err
+	}
 
 	// Extract item info from properties for the approval prompt
 	itemInfo := extractItemInfo(string(path), properties)
@@ -273,7 +278,9 @@ func (c *CollectionHandler) CreateItem(msg dbus.Message, properties map[string]d
 	// DH sessions before forwarding it to the (plain) upstream service.
 	localSecret, ok, err := c.sessions.ForUpstream(secret)
 	if !ok {
-		return "/", "/", dbustypes.ErrSessionNotFound(string(secret.Session))
+		err := dbustypes.ErrSessionNotFound(string(secret.Session))
+		c.logger.LogMethod(ctx, "Collection.CreateItem", map[string]any{"collection": string(path)}, "error", err)
+		return "/", "/", err
 	}
 	if err != nil {
 		c.logger.LogMethod(ctx, "Collection.CreateItem", map[string]any{"collection": string(path)}, "error", err)
