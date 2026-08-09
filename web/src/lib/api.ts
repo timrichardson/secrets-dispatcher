@@ -1,5 +1,6 @@
 import type {
   ActionResponse,
+  ApprovalRuleInput,
   AutoApproveRule,
   ErrorResponse,
   ManagedTrustRule,
@@ -171,6 +172,19 @@ export async function deleteAutoApproveRule(
   return result;
 }
 
+/** Persist a temporary auto-approve rule as a permanent approval rule. */
+export async function persistAutoApproveRule(
+  id: string,
+): Promise<ManagedTrustRule> {
+  const result = await request<ManagedTrustRule>(`/auto-approve/${id}/persist`, {
+    method: "POST",
+  });
+  if (result === null) {
+    throw new ApiError(401, "Unauthenticated");
+  }
+  return result;
+}
+
 /**
  * Create an exact persistent approval rule from a manually approved request.
  */
@@ -195,6 +209,35 @@ export async function createApprovalRuleFromRequest(
  */
 export async function listApprovalRules(): Promise<ManagedTrustRule[]> {
   const result = await request<ManagedTrustRule[]>("/approval-rules");
+  if (result === null) {
+    throw new ApiError(401, "Unauthenticated");
+  }
+  return result;
+}
+
+/** Create a permanent approval rule. */
+export async function createApprovalRule(
+  rule: ApprovalRuleInput,
+): Promise<ManagedTrustRule> {
+  const result = await request<ManagedTrustRule>("/approval-rules", {
+    method: "POST",
+    body: JSON.stringify(rule),
+  });
+  if (result === null) {
+    throw new ApiError(401, "Unauthenticated");
+  }
+  return result;
+}
+
+/** Replace an existing permanent approval rule. */
+export async function updateApprovalRule(
+  id: string,
+  rule: ApprovalRuleInput,
+): Promise<ManagedTrustRule> {
+  const result = await request<ManagedTrustRule>(`/approval-rules/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(rule),
+  });
   if (result === null) {
     throw new ApiError(401, "Unauthenticated");
   }

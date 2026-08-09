@@ -118,6 +118,7 @@ export interface HistoryEntry {
 export interface AutoApproveRule {
   id: string;
   invoker_name: string;
+  invoker_exe: string;
   request_type: string;
   collection: string;
   attributes?: Record<string, string>;
@@ -156,7 +157,18 @@ export interface TrustRule {
 
 export interface ManagedTrustRule extends TrustRule {
   id: string;
+  enabled?: boolean;
   created_at: string;
+  updated_at?: string;
+}
+
+export interface ApprovalRuleInput {
+  name: string;
+  enabled: boolean;
+  request_types: string[];
+  process?: ProcessMatcher;
+  secret?: SecretMatcher;
+  search_attributes?: Record<string, string>;
 }
 
 // WebSocket message types
@@ -172,6 +184,7 @@ export type WSMessage =
   | WSAutoApproveRuleAddedMessage
   | WSAutoApproveRuleRemovedMessage
   | WSApprovalRuleAddedMessage
+  | WSApprovalRuleUpdatedMessage
   | WSApprovalRuleRemovedMessage
   | WSPingMessage;
 
@@ -237,6 +250,11 @@ export interface WSAutoApproveRuleRemovedMessage {
 
 export interface WSApprovalRuleAddedMessage {
   type: "approval_rule_added";
+  approval_rule: ManagedTrustRule;
+}
+
+export interface WSApprovalRuleUpdatedMessage {
+  type: "approval_rule_updated";
   approval_rule: ManagedTrustRule;
 }
 

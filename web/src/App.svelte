@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { PendingRequest, AuthState, ClientInfo, HistoryEntry, AutoApproveRule, ManagedTrustRule, TrustedSigner, TrustRule } from "./lib/types";
-  import { exchangeToken, getStatus, createAutoApprove, deleteAutoApproveRule, createApprovalRuleFromRequest, deleteApprovalRule } from "./lib/api";
+  import type { PendingRequest, AuthState, ClientInfo, HistoryEntry, AutoApproveRule, ManagedTrustRule, ApprovalRuleInput, TrustedSigner, TrustRule } from "./lib/types";
+  import { exchangeToken, getStatus, createAutoApprove, deleteAutoApproveRule, persistAutoApproveRule, createApprovalRule, createApprovalRuleFromRequest, updateApprovalRule, deleteApprovalRule } from "./lib/api";
   import { ApprovalWebSocket } from "./lib/websocket";
   import RequestCard from "./lib/RequestCard.svelte";
   import HistoryEntryCard from "./lib/HistoryEntry.svelte";
   import PropsTable from "./lib/PropsTable.svelte";
+  import ApprovalScopePreview from "./lib/ApprovalScopePreview.svelte";
+  import { validateApprovalRule } from "./lib/approvalRules";
   import { requestPermission, showRequestNotification } from "./lib/notifications";
 
   let authState = $state<AuthState>("checking");
@@ -20,6 +22,13 @@
   let error = $state<string | null>(null);
   let approvalRuleError = $state<string | null>(null);
   let deletingApprovalRule = $state<string | null>(null);
+  let changingApprovalRule = $state<string | null>(null);
+  let persistingRule = $state<string | null>(null);
+  let editingRule = $state<ManagedTrustRule | null>(null);
+  let creatingRule = $state(false);
+  let ruleDraft = $state("");
+  let ruleEditorError = $state<string | null>(null);
+  let savingRuleDraft = $state(false);
   let connected = $state(false);
   let sidebarOpen = $state(false);
   let historyOpen = $state(true);
@@ -145,6 +154,9 @@
         autoApproveRules = autoApproveRules.filter(r => r.id !== id);
       },
       onApprovalRuleAdded: (rule) => {
+        upsertApprovalRule(rule);
+      },
+      onApprovalRuleUpdated: (rule) => {
         upsertApprovalRule(rule);
       },
       onApprovalRuleRemoved: (id) => {
@@ -292,6 +304,21 @@
     }
   }
 
+  async function handlePersistRule(ruleId: string) {
+    if (persistingRule !== null) return;
+    approvalRuleError = null;
+    persistingRule = ruleId;
+    try {
+      const rule = await persistAutoApproveRule(ruleId);
+      upsertApprovalRule(rule);
+      autoApproveRules = autoApproveRules.filter(r => r.id !== ruleId);
+    } catch (err) {
+      approvalRuleError = err instanceof Error ? err.message : "Could not save temporary rule";
+    } finally {
+      persistingRule = null;
+    }
+  }
+
   function upsertApprovalRule(rule: ManagedTrustRule) {
     const existing = approvalRules.findIndex(r => r.id === rule.id);
     if (existing === -1) {
@@ -307,12 +334,17 @@
     approvalRuleError = null;
   }
 
+  async function revokeApprovalRule(ruleId: string) {
+    await deleteApprovalRule(ruleId);
+    approvalRules = approvalRules.filter(r => r.id !== ruleId);
+    approvalRuleError = null;
+  }
+
   async function handleDeleteApprovalRule(ruleId: string) {
     approvalRuleError = null;
     deletingApprovalRule = ruleId;
     try {
-      await deleteApprovalRule(ruleId);
-      approvalRules = approvalRules.filter(r => r.id !== ruleId);
+      await revokeApprovalRule(ruleId);
     } catch (err) {
       approvalRuleError = err instanceof Error ? err.message : "Could not remove saved approval";
     } finally {
@@ -320,9 +352,109 @@
     }
   }
 
+
+  function approvalRuleInput(rule: ManagedTrustRule): ApprovalRuleInput {
+    return {
+      name: rule.name ?? rule.id,
+      enabled: rule.enabled !== false,
+      request_types: rule.request_types ?? [],
+      process: rule.process,
+      secret: rule.secret,
+      search_attributes: rule.search_attributes,
+    };
+  }
+
+  async function handleToggleApprovalRule(rule: ManagedTrustRule) {
+    approvalRuleError = null;
+    changingApprovalRule = rule.id;
+    try {
+      const updated = await updateApprovalRule(rule.id, {
+        ...approvalRuleInput(rule),
+        enabled: rule.enabled === false,
+      });
+      upsertApprovalRule(updated);
+    } catch (err) {
+      approvalRuleError = err instanceof Error ? err.message : "Could not update approval rule";
+    } finally {
+      changingApprovalRule = null;
+    }
+  }
+
+  function startCreateRule() {
+    creatingRule = true;
+    editingRule = null;
+    ruleEditorError = null;
+    ruleDraft = JSON.stringify({
+      name: "New approval rule",
+      enabled: true,
+      request_types: ["get_secret"],
+      process: { exe: "/usr/bin/example", direct: true },
+      secret: { collection: "login", attributes: {} },
+    }, null, 2);
+  }
+
+  function startEditRule(rule: ManagedTrustRule) {
+    editingRule = rule;
+    creatingRule = false;
+    ruleEditorError = null;
+    ruleDraft = JSON.stringify(approvalRuleInput(rule), null, 2);
+  }
+
+  function closeRuleEditor() {
+    if (savingRuleDraft) return;
+    editingRule = null;
+    creatingRule = false;
+    ruleDraft = "";
+    ruleEditorError = null;
+  }
+
+  async function saveRuleDraft() {
+    if (savingRuleDraft) return;
+    const validation = ruleDraftValidation;
+    if (!validation.rule) {
+      ruleEditorError = validation.error;
+      return;
+    }
+    savingRuleDraft = true;
+    ruleEditorError = null;
+    try {
+      const saved = editingRule
+        ? await updateApprovalRule(editingRule.id, validation.rule)
+        : await createApprovalRule(validation.rule);
+      upsertApprovalRule(saved);
+      savingRuleDraft = false;
+      closeRuleEditor();
+    } catch (err) {
+      ruleEditorError = err instanceof Error ? err.message : "Could not save approval rule";
+    } finally {
+      savingRuleDraft = false;
+    }
+  }
+
+  let ruleDraftValidation = $derived.by((): { rule?: ApprovalRuleInput; error?: string } => {
+    try {
+      return { rule: validateApprovalRule(JSON.parse(ruleDraft)) };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "Invalid rule JSON" };
+    }
+  });
+
   function basename(path: string): string {
     const slash = path.lastIndexOf("/");
     return slash >= 0 ? path.slice(slash + 1) : path;
+  }
+
+  function requestTypeLabel(type: string): string {
+    switch (type) {
+      case "gpg_sign": return "GPG Sign";
+      case "ssh_sign": return "SSH Sign";
+      case "get_secret": return "Secret";
+      default: return type.charAt(0).toUpperCase() + type.slice(1);
+    }
+  }
+
+  function savedRuleProcess(rule: ManagedTrustRule): string | undefined {
+    return rule.process?.unit ?? rule.process?.name ?? rule.process?.exe ?? rule.process?.cwd;
   }
 
   function formatRuleExpiry(expiresAt: string, _tick: number): string {
@@ -420,9 +552,9 @@
           </ul>
         {/if}
       </div>
-      {#if autoApproveRules.length > 0 || trustedSigners.length > 0}
+      {#if trustedSigners.length > 0}
         <div class="sidebar-rules">
-          <h3>Auto-Approve Rules</h3>
+          <h3>Trusted Signers</h3>
           <ul class="rules-list">
             {#each trustedSigners as signer (signer.exe_path + (signer.repo_path ?? '') + (signer.file_prefix ?? ''))}
               {@const attrs = {
@@ -435,22 +567,6 @@
                   <span class="rule-permanent">permanent</span>
                 </div>
                 <PropsTable process={basename(signer.exe_path)} attributes={attrs} />
-              </li>
-            {/each}
-            {#each autoApproveRules as rule (rule.id)}
-              <li class="rule-entry">
-                <div class="rule-header">
-                  <span class="history-type history-type--{rule.request_type}">
-                    {#if rule.request_type === "gpg_sign"}GPG Sign{:else if rule.request_type === "search"}Search{:else if rule.request_type === "delete"}Delete{:else if rule.request_type === "write"}Write{:else}Secret{/if}
-                  </span>
-                  <div class="rule-header-right">
-                    <span class="rule-expiry">{formatRuleExpiry(rule.expires_at, tick)}</span>
-                    <button class="rule-delete" onclick={() => handleDeleteRule(rule.id)} title="Remove rule">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                    </button>
-                  </div>
-                </div>
-                <PropsTable process={rule.invoker_name} collection={rule.collection} attributes={rule.attributes} />
               </li>
             {/each}
           </ul>
@@ -546,7 +662,7 @@
         <!-- Single-request mode: opened from desktop notification -->
         {@const focusedRequest = requests.find(r => r.id === focusRequestId)}
         {#if focusedRequest}
-          <RequestCard request={focusedRequest} onAction={handleAction} {autoApproveDurationSeconds} />
+          <RequestCard request={focusedRequest} onAction={handleAction} onSaveRule={handleSaveApproval} {autoApproveDurationSeconds} />
         {:else if focusRequestGone}
           <div class="empty-state">
             <p>Request is no longer pending</p>
@@ -572,7 +688,7 @@
             {#if historyOpen}
               <ul class="history-list">
                 {#each groupedHistory as group (group.entry.request.id + group.entry.resolved_at)}
-                  <HistoryEntryCard entry={group.entry} count={group.count} {tick} {autoApproveRules} {approvalRules} {formatTime} {toggleTimeFormat} onAutoApprove={handleAutoApprove} onSaveApproval={handleSaveApproval} />
+                  <HistoryEntryCard entry={group.entry} count={group.count} {tick} {autoApproveRules} {approvalRules} {formatTime} {toggleTimeFormat} onAutoApprove={handleAutoApprove} onSaveApproval={handleSaveApproval} onRevokeApproval={revokeApprovalRule} />
                 {/each}
               </ul>
             {/if}
@@ -582,7 +698,7 @@
         <section>
           <h2>Pending Requests ({requests.length})</h2>
           {#each [...requests].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()) as request (request.id)}
-            <RequestCard {request} onAction={handleAction} {autoApproveDurationSeconds} />
+            <RequestCard {request} onAction={handleAction} onSaveRule={handleSaveApproval} {autoApproveDurationSeconds} />
           {/each}
         </section>
         <!-- Show history section below pending requests -->
@@ -597,7 +713,7 @@
             {#if historyOpen}
               <ul class="history-list">
                 {#each groupedHistory as group (group.entry.request.id + group.entry.resolved_at)}
-                  <HistoryEntryCard entry={group.entry} count={group.count} {tick} {autoApproveRules} {approvalRules} {formatTime} {toggleTimeFormat} onAutoApprove={handleAutoApprove} onSaveApproval={handleSaveApproval} />
+                  <HistoryEntryCard entry={group.entry} count={group.count} {tick} {autoApproveRules} {approvalRules} {formatTime} {toggleTimeFormat} onAutoApprove={handleAutoApprove} onSaveApproval={handleSaveApproval} onRevokeApproval={revokeApprovalRule} />
                 {/each}
               </ul>
             {/if}
@@ -606,56 +722,121 @@
       {/if}
 
       {#if authState === "authenticated" && !loading && !focusRequestId}
-        <section class="approval-rules-section" aria-labelledby="saved-approvals-heading">
+        <section class="approval-rules-section" id="approval-rules" aria-labelledby="saved-approvals-heading">
           <div class="section-heading">
             <div>
               <h2 id="saved-approvals-heading">Saved Approvals ({approvalRules.length})</h2>
-              <p>Exact secret access scopes saved from manually approved activity.</p>
+              <p>Manage temporary allowances and permanent approval scopes.</p>
             </div>
+            <button class="rule-action" onclick={startCreateRule}>New rule</button>
           </div>
           {#if approvalRuleError}
             <p class="error-message" role="alert">{approvalRuleError}</p>
           {/if}
-          {#if approvalRules.length === 0}
-            <p class="rules-empty">No saved approvals. Create one after manually approving an eligible secret access.</p>
-          {:else}
-            <ul class="rules-list approval-rules-list">
-              {#each approvalRules as rule (rule.id)}
-                <li class="rule-entry">
-                  <div class="rule-header">
-                    <span class="history-type">Secret</span>
-                    <div class="rule-header-right">
-                      <span class="rule-permanent">saved</span>
-                      <button
-                        class="rule-delete"
-                        onclick={() => handleDeleteApprovalRule(rule.id)}
-                        disabled={deletingApprovalRule === rule.id}
-                        title="Remove saved approval"
-                        aria-label={`Remove saved approval ${rule.name ?? rule.id}`}
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                      </button>
-                    </div>
-                  </div>
-                  {#if rule.name}
-                    <div class="saved-rule-name">{rule.name}</div>
-                  {/if}
-                  <PropsTable
-                    process={rule.process?.exe}
-                    collection={rule.secret?.collection}
-                    attributes={rule.secret?.attributes}
-                  />
-                  {#if rule.process?.args}
-                    <div class="rule-scope"><span>script</span><code>{rule.process.args}</code></div>
-                  {/if}
-                  {#if rule.process?.cwd}
-                    <div class="rule-scope"><span>cwd</span><code>{rule.process.cwd}</code></div>
-                  {/if}
-                </li>
-              {/each}
-            </ul>
-          {/if}
+          <div class="rules-panel">
+            <div class="rules-subsection">
+              <h3>Temporary Rules</h3>
+              {#if autoApproveRules.length === 0}
+                <p class="rules-empty">No temporary approval rules active.</p>
+              {:else}
+                <ul class="rules-list">
+                  {#each autoApproveRules as rule (rule.id)}
+                    <li class="rule-entry">
+                      <div class="rule-header">
+                        <span class="history-type history-type--{rule.request_type}">{requestTypeLabel(rule.request_type)}</span>
+                        <div class="rule-header-right">
+                          <span class="rule-expiry">{formatRuleExpiry(rule.expires_at, tick)}</span>
+                          {#if rule.request_type !== 'gpg_sign'}
+                            <button class="rule-action" onclick={() => handlePersistRule(rule.id)} disabled={persistingRule !== null}>
+                              {persistingRule === rule.id ? 'Saving...' : 'Save'}
+                            </button>
+                          {/if}
+                          <button class="rule-delete" onclick={() => handleDeleteRule(rule.id)} title="Remove temporary rule" aria-label={`Remove temporary rule ${rule.id}`}>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                      </div>
+                      <PropsTable process={rule.invoker_exe} collection={rule.collection} attributes={rule.attributes} />
+                      {#if rule.invoker_name}<div class="rule-secondary">Process name: {rule.invoker_name}</div>{/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+
+            <div class="rules-subsection">
+              <h3>Permanent Rules</h3>
+              {#if approvalRules.length === 0}
+                <p class="rules-empty">No saved approvals. Save an eligible request, persist a temporary rule, or create one here.</p>
+              {:else}
+                <ul class="rules-list approval-rules-list">
+                  {#each approvalRules as rule (rule.id)}
+                    <li class="rule-entry" class:rule-disabled={rule.enabled === false}>
+                      <div class="rule-header">
+                        <span class="history-type history-type--{rule.request_types?.[0] ?? 'get_secret'}">
+                          {(rule.request_types ?? []).map(requestTypeLabel).join(', ') || 'All requests'}
+                        </span>
+                        <div class="rule-header-right">
+                          <span class="rule-permanent">{rule.enabled === false ? 'disabled' : 'saved'}</span>
+                          <button class="rule-action" onclick={() => handleToggleApprovalRule(rule)} disabled={changingApprovalRule === rule.id}>
+                            {rule.enabled === false ? 'Enable' : 'Disable'}
+                          </button>
+                          <button class="rule-action" onclick={() => startEditRule(rule)}>Edit</button>
+                          <button
+                            class="rule-delete"
+                            onclick={() => handleDeleteApprovalRule(rule.id)}
+                            disabled={deletingApprovalRule === rule.id}
+                            title="Delete saved rule"
+                            aria-label={`Remove saved approval ${rule.name ?? rule.id}`}
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                          </button>
+                        </div>
+                      </div>
+                      {#if rule.name}<div class="saved-rule-name">{rule.name}</div>{/if}
+                      <PropsTable process={savedRuleProcess(rule)} collection={rule.secret?.collection} attributes={rule.secret?.attributes ?? rule.search_attributes} />
+                      {#if rule.process?.args}<div class="rule-scope"><span>script</span><code>{rule.process.args}</code></div>{/if}
+                      {#if rule.process?.cwd}<div class="rule-scope"><span>cwd</span><code>{rule.process.cwd}</code></div>{/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          </div>
         </section>
+      {/if}
+
+      {#if editingRule || creatingRule}
+        <button class="rule-editor-backdrop" onclick={closeRuleEditor} aria-label="Close rule editor"></button>
+        <div class="rule-editor" role="dialog" aria-modal="true" aria-labelledby="rule-editor-heading">
+          <div class="rule-editor-header">
+            <h2 id="rule-editor-heading">{editingRule ? "Edit approval rule" : "Create approval rule"}</h2>
+            <button class="rule-delete" onclick={closeRuleEditor} aria-label="Close rule editor">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+          </div>
+          <p class="rule-editor-help">Edit the full rule scope as JSON. Process, secret, and search values may use backend-supported glob patterns.</p>
+          {#if ruleEditorError}<p class="error-message" role="alert">{ruleEditorError}</p>{/if}
+          <textarea class="rule-editor-textarea" bind:value={ruleDraft} spellcheck="false" aria-label="Approval rule JSON"></textarea>
+          {#if ruleDraftValidation.rule}
+            <ApprovalScopePreview
+              requestTypes={ruleDraftValidation.rule.request_types}
+              process={ruleDraftValidation.rule.process!}
+              secret={ruleDraftValidation.rule.secret}
+              searchAttributes={ruleDraftValidation.rule.search_attributes}
+              enabled={ruleDraftValidation.rule.enabled}
+              allItems={Boolean(ruleDraftValidation.rule.secret)}
+            />
+          {:else}
+            <p class="draft-validation" aria-live="polite">{ruleDraftValidation.error}</p>
+          {/if}
+          <div class="rule-editor-actions">
+            <button class="rule-action" onclick={closeRuleEditor} disabled={savingRuleDraft}>Cancel</button>
+            <button class="btn-retry" onclick={saveRuleDraft} disabled={savingRuleDraft}>
+              {savingRuleDraft ? "Saving..." : editingRule ? "Save changes" : "Create rule"}
+            </button>
+          </div>
+        </div>
       {/if}
 
       {#if authState === "authenticated" && !loading && !focusRequestId && trustRules.length > 0}
@@ -1087,6 +1268,13 @@
     margin-bottom: 4px;
   }
 
+  .section-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
   .section-heading p,
   .rules-empty {
     margin: 0;
@@ -1095,7 +1283,23 @@
   }
 
   .approval-rules-list {
-    margin-top: 12px;
+    margin-top: 0;
+  }
+
+  .rules-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    margin-top: 16px;
+  }
+
+  .rules-subsection h3 {
+    margin: 0 0 8px;
+    color: var(--color-text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
   }
 
   .saved-rule-name {
@@ -1103,6 +1307,12 @@
     color: var(--color-text);
     font-size: 13px;
     font-weight: 500;
+  }
+
+  .rule-secondary {
+    margin-top: 3px;
+    color: var(--color-text-muted);
+    font-size: 11px;
   }
 
   .rule-scope {
@@ -1187,6 +1397,30 @@
     opacity: 0.4;
   }
 
+  .rule-action {
+    padding: 3px 7px;
+    color: var(--color-text-muted);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .rule-action:hover:not(:disabled) {
+    color: var(--color-text);
+    background: var(--color-surface-hover);
+  }
+
+  .rule-action:disabled {
+    cursor: wait;
+    opacity: 0.5;
+  }
+
+  .rule-disabled {
+    opacity: 0.62;
+  }
+
   .rule-expiry {
     font-size: 11px;
     color: var(--color-warning);
@@ -1203,6 +1437,76 @@
     color: var(--color-text-muted);
     font-style: italic;
     margin-top: 2px;
+  }
+
+  .rule-editor-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 198;
+    background: rgba(0, 0, 0, 0.45);
+    border: 0;
+  }
+
+  .rule-editor {
+    position: fixed;
+    z-index: 199;
+    top: 50%;
+    left: 50%;
+    width: min(620px, calc(100vw - 32px));
+    max-height: calc(100vh - 48px);
+    margin: 0;
+    padding: 16px;
+    overflow: auto;
+    transform: translate(-50%, -50%);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+  }
+
+  .rule-editor-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+
+  .rule-editor-header h2 {
+    margin: 0;
+    color: var(--color-text);
+  }
+
+  .rule-editor-help {
+    margin: 0 0 12px;
+    color: var(--color-text-muted);
+    font-size: 13px;
+  }
+
+  .rule-editor-textarea {
+    width: 100%;
+    min-height: 280px;
+    padding: 12px;
+    resize: vertical;
+    color: var(--color-text);
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-family: ui-monospace, "SF Mono", Monaco, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .rule-editor-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .draft-validation {
+    margin: 8px 0 0;
+    color: var(--color-danger);
+    font-size: 12px;
   }
 
   /* Desktop: show sidebar by default, hide toggle */

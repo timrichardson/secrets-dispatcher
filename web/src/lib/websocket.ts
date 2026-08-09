@@ -32,6 +32,7 @@ export interface ApprovalWebSocketCallbacks {
   onAutoApproveRuleAdded?: (rule: AutoApproveRule) => void;
   onAutoApproveRuleRemoved?: (id: string) => void;
   onApprovalRuleAdded?: (rule: ManagedTrustRule) => void;
+  onApprovalRuleUpdated?: (rule: ManagedTrustRule) => void;
   onApprovalRuleRemoved?: (id: string) => void;
   onConnectionChange?: (isConnected: boolean) => void;
   onAuthError?: () => void;
@@ -195,6 +196,9 @@ export class ApprovalWebSocket {
         break;
       case "approval_rule_added":
         this.callbacks.onApprovalRuleAdded?.(msg.approval_rule);
+        break;
+      case "approval_rule_updated":
+        this.callbacks.onApprovalRuleUpdated?.(msg.approval_rule);
         break;
       case "approval_rule_removed":
         this.callbacks.onApprovalRuleRemoved?.(msg.id);

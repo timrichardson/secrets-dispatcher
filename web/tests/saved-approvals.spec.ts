@@ -123,6 +123,16 @@ test.describe("Saved approvals", () => {
     await expect(page.getByText("Saved Approvals (2)")).toBeVisible();
     await expect(page.getByText("gh: Work token")).toBeVisible();
 
+    sendToPage!(JSON.stringify({
+      type: "approval_rule_updated",
+      approval_rule: {
+        ...savedRule("saved-2", "gh: Updated work token"),
+        enabled: false,
+      },
+    }));
+    await expect(page.getByText("gh: Updated work token")).toBeVisible();
+    await expect(page.getByText("disabled")).toBeVisible();
+
     sendToPage!(
       JSON.stringify({ type: "approval_rule_removed", id: "saved-1" }),
     );
@@ -141,12 +151,21 @@ test.describe("Saved approvals", () => {
     });
 
     let requestBody: unknown;
+    let revokedRuleId: string | undefined;
     await page.route("**/api/v1/approval-rules/from-request", async (route) => {
       requestBody = route.request().postDataJSON();
       await route.fulfill({
         status: 201,
         contentType: "application/json",
         body: JSON.stringify(savedRule("created-1", "gh: GitHub token")),
+      });
+    });
+    await page.route("**/api/v1/approval-rules/created-1", async (route) => {
+      revokedRuleId = route.request().url().split("/").at(-1);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "deleted" }),
       });
     });
 
@@ -167,8 +186,15 @@ test.describe("Saved approvals", () => {
     await page.getByRole("button", { name: "Save exact approval" }).click();
     expect(requestBody).toEqual({ request_id: "eligible-1" });
     await expect(page.getByText("Saved Approvals (1)")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Exact approval saved" }))
-      .toBeDisabled();
+    const revokeButton = page.getByRole("button", { name: "Revoke saved rule" });
+    await expect(revokeButton).toBeVisible();
+
+    await revokeButton.click();
+    expect(revokedRuleId).toBe("created-1");
+    await expect(page.getByText("Saved Approvals (0)")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Always approve exact access" }),
+    ).toBeEnabled();
   });
 
   test("warns when an interpreter rule relies on argv", async ({ page }) => {

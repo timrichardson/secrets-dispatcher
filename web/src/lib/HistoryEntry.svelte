@@ -2,6 +2,7 @@
   import type { HistoryEntry as HistoryEntryType, PendingRequest, AutoApproveRule, ManagedTrustRule, ProcessInfo } from "./types";
   import RequestOverview from "./RequestOverview.svelte";
   import PropsTable from "./PropsTable.svelte";
+  import { deriveRequestApprovalScope, findRequestApprovalRule } from "./approvalRules";
 
   interface Props {
     entry: HistoryEntryType;
@@ -13,11 +14,13 @@
     toggleTimeFormat: () => void;
     onAutoApprove: (requestId: string) => void;
     onSaveApproval: (requestId: string) => Promise<void>;
+    onRevokeApproval: (ruleId: string) => Promise<void>;
   }
 
-  let { entry, count = 1, tick, autoApproveRules, approvalRules, formatTime, toggleTimeFormat, onAutoApprove, onSaveApproval }: Props = $props();
+  let { entry, count = 1, tick, autoApproveRules, approvalRules, formatTime, toggleTimeFormat, onAutoApprove, onSaveApproval, onRevokeApproval }: Props = $props();
   let confirmingApproval = $state(false);
   let savingApproval = $state(false);
+  let revokingApproval = $state(false);
   let saveApprovalError = $state<string | null>(null);
 
   function resolutionClass(resolution: string): string {
@@ -71,11 +74,11 @@
 
   function hasMatchingRule(entry: HistoryEntryType): boolean {
     const req = entry.request;
-    const invoker = req.sender_info?.invoker_name ?? "";
+    const invokerExe = req.sender_info?.process_chain?.[0]?.exe ?? "";
     const collection = req.items.length > 0 ? extractCollection(req.items[0].path) : "";
     const attrs = req.items.length > 0 ? req.items[0].attributes : undefined;
     return autoApproveRules.some(r =>
-      r.invoker_name === invoker &&
+      r.invoker_exe === invokerExe &&
       r.request_type === req.type &&
       r.collection === collection &&
       attributesEqual(r.attributes, attrs)
@@ -86,6 +89,8 @@
     switch (source) {
       case "config_rule": return "config rule";
       case "temporary_rule": return "temporary rule";
+      case "managed_rule": return "saved approval";
+      case "saved_rule": return "saved approval";
       case "trusted_signer": return "trusted signer";
       case "managed_rule": return "saved approval";
       default: return source.replaceAll("_", " ");
@@ -127,7 +132,7 @@
 
   function approvalScope(entry: HistoryEntryType): ApprovalScope | null {
     const req = entry.request;
-    if (entry.resolution !== "approved" || req.type !== "get_secret" || req.items.length !== 1) {
+    if (!["approved", "cancelled", "auto_approved"].includes(entry.resolution) || req.type !== "get_secret" || req.items.length !== 1) {
       return null;
     }
     const item = req.items[0];
@@ -158,26 +163,9 @@
     };
   }
 
-  function globQuote(value: string): string {
-    return [...value].map(char => ["\\", "*", "?", "["].includes(char) ? `\\${char}` : char).join("");
-  }
-
-  function hasSavedApproval(scope: ApprovalScope | null): boolean {
-    if (!scope) return false;
-    const quotedAttributes = Object.fromEntries(
-      Object.entries(scope.attributes).map(([key, value]) => [key, globQuote(value)]),
-    );
-    return approvalRules.some(rule =>
-      rule.action === "approve" &&
-      rule.request_types?.length === 1 &&
-      rule.request_types[0] === "get_secret" &&
-      rule.process?.direct === true &&
-      rule.process.exe === globQuote(scope.process.exe ?? "") &&
-      (rule.process.args ?? "") === (scope.script ? globQuote(scope.script) : "") &&
-      (rule.process.cwd ?? "") === (scope.cwd ? globQuote(scope.cwd) : "") &&
-      rule.secret?.collection === globQuote(scope.collection) &&
-      attributesEqual(rule.secret.attributes, quotedAttributes)
-    );
+  function canSaveRule(entry: HistoryEntryType): boolean {
+    return ["approved", "cancelled", "auto_approved"].includes(entry.resolution) &&
+      deriveRequestApprovalScope(entry.request) !== null;
   }
 
   async function saveApproval() {
@@ -193,8 +181,22 @@
     }
   }
 
+  async function revokeApproval(ruleId: string) {
+    revokingApproval = true;
+    saveApprovalError = null;
+    try {
+      await onRevokeApproval(ruleId);
+    } catch (err) {
+      saveApprovalError = err instanceof Error ? err.message : "Could not revoke saved rule";
+    } finally {
+      revokingApproval = false;
+    }
+  }
+
   let savedApprovalScope = $derived(approvalScope(entry));
-  let approvalAlreadySaved = $derived(hasSavedApproval(savedApprovalScope));
+  let matchingApprovalRule = $derived(
+    canSaveRule(entry) ? findRequestApprovalRule(entry.request, approvalRules) : undefined,
+  );
 </script>
 
 <li class="history-entry">
@@ -233,7 +235,18 @@
   {#if entry.resolution === "cancelled"}
     <button class="btn-auto-approve" onclick={() => onAutoApprove(entry.request.id)}>{hasMatchingRule(entry) ? "Reset auto-approve timer" : "Auto-approve similar"}</button>
   {/if}
-  {#if savedApprovalScope}
+  {#if matchingApprovalRule}
+    <button
+      class="btn-save-approval"
+      onclick={() => revokeApproval(matchingApprovalRule.id)}
+      disabled={revokingApproval}
+    >
+      {revokingApproval ? "Revoking saved rule..." : "Revoke saved rule"}
+    </button>
+    {#if saveApprovalError}
+      <p class="inline-error" role="alert">{saveApprovalError}</p>
+    {/if}
+  {:else if savedApprovalScope}
     {#if confirmingApproval}
       <div class="approval-confirmation">
         <strong>Always approve this exact access?</strong>
@@ -268,9 +281,24 @@
         </div>
       </div>
     {:else}
-      <button class="btn-save-approval" onclick={() => confirmingApproval = true} disabled={approvalAlreadySaved}>
-        {approvalAlreadySaved ? "Exact approval saved" : "Always approve exact access"}
+      <button class="btn-save-approval" onclick={() => confirmingApproval = true}>
+        Always approve exact access
       </button>
+    {/if}
+  {:else if canSaveRule(entry)}
+    <button
+      class="btn-save-approval"
+      onclick={saveApproval}
+      disabled={savingApproval}
+    >
+      {#if savingApproval}
+        Saving rule...
+      {:else}
+        Save as approval rule
+      {/if}
+    </button>
+    {#if saveApprovalError}
+      <p class="inline-error" role="alert">{saveApprovalError}</p>
     {/if}
   {/if}
 </li>
@@ -516,6 +544,12 @@
   .approval-confirmation .inline-error {
     margin-top: 8px;
     color: var(--color-danger);
+  }
+
+  .inline-error {
+    margin: 4px 0 0;
+    color: var(--color-danger);
+    font-size: 12px;
   }
 
   .confirmation-actions {
