@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,7 +17,9 @@ import (
 func validManagedRule() ManagedTrustRule {
 	return ManagedTrustRule{
 		ID:        uuid.New().String(),
+		Enabled:   true,
 		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
 		TrustRule: TrustRule{
 			Name:         "gh: token",
 			Action:       "approve",
@@ -91,12 +94,21 @@ func TestFileManagedTrustRuleStoreMigratesLegacyRules(t *testing.T) {
       "updated_at": "2026-06-16T12:00:18Z"
     },
     {
-      "id": "a5961a29-b8d4-4b19-bcd1-be02821b997b",
+      "id": "legacy-search-rule",
       "name": "unsupported search",
       "enabled": true,
       "request_types": ["search"],
       "process": {"exe": "/usr/bin/gh"},
       "search_attributes": {"service": "github"},
+      "created_at": "2026-06-16T12:00:18Z",
+      "updated_at": "2026-06-16T12:00:18Z"
+    },
+    {
+      "id": "unsupported-gpg-rule",
+      "name": "unsupported gpg",
+      "enabled": true,
+      "request_types": ["gpg_sign"],
+      "process": {"exe": "/usr/bin/git"},
       "created_at": "2026-06-16T12:00:18Z",
       "updated_at": "2026-06-16T12:00:18Z"
     }
@@ -107,10 +119,12 @@ func TestFileManagedTrustRuleStoreMigratesLegacyRules(t *testing.T) {
 	store := NewFileManagedTrustRuleStore(dir)
 	rules, err := store.Load()
 	require.NoError(t, err)
-	require.Len(t, rules, 1)
+	require.Len(t, rules, 2)
 	assert.Equal(t, "gh get_secret", rules[0].Name)
 	assert.Equal(t, "approve", rules[0].Action)
-	assert.True(t, rules[0].Process.Direct)
+	assert.False(t, rules[0].Process.Direct)
+	assert.Equal(t, []string{"search"}, rules[1].RequestTypes)
+	assert.Equal(t, map[string]string{"service": "github"}, rules[1].SearchAttributes)
 
 	backup, err := os.ReadFile(file + ".legacy-v1")
 	require.NoError(t, err)
@@ -175,15 +189,10 @@ func TestValidateManagedTrustRuleRejectsUnsafePolicy(t *testing.T) {
 		mutate func(*ManagedTrustRule)
 	}{
 		{"deny", func(r *ManagedTrustRule) { r.Action = "deny" }},
-		{"write", func(r *ManagedTrustRule) { r.RequestTypes = []string{string(RequestTypeWrite)} }},
 		{"gpg", func(r *ManagedTrustRule) { r.RequestTypes = []string{string(RequestTypeGPGSign)} }},
-		{"not direct", func(r *ManagedTrustRule) { r.Process.Direct = false }},
 		{"missing exe", func(r *ManagedTrustRule) { r.Process.Exe = "" }},
 		{"relative exe", func(r *ManagedTrustRule) { r.Process.Exe = "bin/gh" }},
-		{"name fallback", func(r *ManagedTrustRule) { r.Process.Name = "gh" }},
-		{"wildcard exe", func(r *ManagedTrustRule) { r.Process.Exe = "/usr/bin/*" }},
-		{"wildcard attribute", func(r *ManagedTrustRule) { r.Secret.Attributes["service"] = "git*" }},
-		{"missing attributes", func(r *ManagedTrustRule) { r.Secret.Attributes = nil }},
+		{"invalid glob", func(r *ManagedTrustRule) { r.Process.Exe = "[" }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -254,9 +263,7 @@ func TestManagedTrustRuleGenerationRejectsUnsafeRequests(t *testing.T) {
 		name   string
 		mutate func(*Request)
 	}{
-		{"write", func(r *Request) { r.Type = RequestTypeWrite }},
-		{"multiple items", func(r *Request) { r.Items = append(r.Items, r.Items[0]) }},
-		{"no attributes", func(r *Request) { r.Items[0].Attributes = nil }},
+		{"gpg", func(r *Request) { r.Type = RequestTypeGPGSign }},
 		{"no process", func(r *Request) { r.SenderInfo.ProcessChain = nil }},
 		{"unresolved exe", func(r *Request) { r.SenderInfo.ProcessChain[0].Exe = "" }},
 	}
@@ -357,12 +364,13 @@ func TestManagerManagedRuleMatchesAfterStoreReload(t *testing.T) {
 	assert.True(t, autoApproved)
 }
 
-func TestCreateManagedTrustRuleRequiresManualApproval(t *testing.T) {
+func TestCreateManagedTrustRuleAllowsEligibleAutoApprovedHistory(t *testing.T) {
 	mgr := NewManager(ManagerConfig{HistoryMax: 10})
 	req := managedRuleRequest("/usr/bin/gh")
 	mgr.AddHistoryEntry(HistoryEntry{Request: req, Resolution: ResolutionAutoApproved})
-	_, _, err := mgr.CreateManagedTrustRuleFromRequest(req.ID)
-	require.ErrorIs(t, err, ErrInvalidManagedRule)
+	_, created, err := mgr.CreateManagedTrustRuleFromRequest(req.ID)
+	require.NoError(t, err)
+	assert.True(t, created)
 }
 
 func TestConfigDenyPrecedesAllAutomaticApprovalSources(t *testing.T) {
@@ -426,4 +434,296 @@ func TestCheckTrustRulesByActionSkipsOtherActions(t *testing.T) {
 func TestDirectUnitMatcherDoesNotRequireProcessChain(t *testing.T) {
 	rule := TrustRule{Process: &ProcessMatcher{Unit: "app.service", Direct: true}}
 	assert.True(t, matchTrustRule(&rule, SenderInfo{SystemdUnit: "app.service"}, nil, RequestTypeGetSecret, nil))
+}
+
+func TestManagedTrustRuleCRUDAndBroadMatching(t *testing.T) {
+	mgr := NewManager(ManagerConfig{HistoryMax: 10})
+	rule, err := mgr.CreateManagedTrustRule(ManagedTrustRule{Enabled: true, TrustRule: TrustRule{
+		Name:         "legacy browser secrets",
+		RequestTypes: []string{string(RequestTypeGetSecret)},
+		Process:      &ProcessMatcher{Name: "browser-*", CWD: "/home/*", Unit: "app-*.service"},
+		Secret:       &SecretMatcher{Collection: "log*", Attributes: map[string]string{"service": "git*"}},
+	}})
+	require.NoError(t, err)
+	assert.True(t, rule.Enabled)
+
+	sender := SenderInfo{SystemdUnit: "app-browser.service", ProcessChain: []ProcessInfo{
+		{Name: "helper", CWD: "/tmp"},
+		{Name: "browser-stable", CWD: "/home/tim"},
+	}}
+	items := []ItemInfo{
+		{Path: "/org/freedesktop/secrets/collection/login/1", Attributes: map[string]string{"service": "github"}},
+		{Path: "/org/freedesktop/secrets/collection/login/2", Attributes: map[string]string{"service": "gitlab"}},
+	}
+	assert.NotNil(t, mgr.checkManagedTrustRules(sender, items, RequestTypeGetSecret, nil))
+	searchRule, err := mgr.CreateManagedTrustRule(ManagedTrustRule{Enabled: true, TrustRule: TrustRule{
+		RequestTypes:     []string{string(RequestTypeSearch)},
+		Process:          &ProcessMatcher{Name: "browser-*"},
+		SearchAttributes: map[string]string{"service": "git*"},
+	}})
+	require.NoError(t, err)
+	assert.NotNil(t, mgr.checkManagedTrustRules(sender, nil, RequestTypeSearch, map[string]string{"service": "github"}))
+
+	rule.Enabled = false
+	updated, err := mgr.UpdateManagedTrustRule(rule.ID, rule)
+	require.NoError(t, err)
+	assert.False(t, updated.Enabled)
+	assert.Nil(t, mgr.checkManagedTrustRules(sender, items, RequestTypeGetSecret, nil))
+	require.NoError(t, mgr.RemoveManagedTrustRule(rule.ID))
+	require.NoError(t, mgr.RemoveManagedTrustRule(searchRule.ID))
+	assert.Empty(t, mgr.ListManagedTrustRules())
+}
+
+func TestRecordPassthroughAttributesMatchingRules(t *testing.T) {
+	tests := []struct {
+		name        string
+		requestType RequestType
+		items       []ItemInfo
+		searchAttrs map[string]string
+		rule        TrustRule
+	}{
+		{
+			name:        "search",
+			requestType: RequestTypeSearch,
+			searchAttrs: map[string]string{"service": "github"},
+			rule: TrustRule{
+				RequestTypes:     []string{string(RequestTypeSearch)},
+				Process:          &ProcessMatcher{Exe: "/usr/bin/browser", Direct: true},
+				SearchAttributes: map[string]string{"service": "git*"},
+			},
+		},
+		{
+			name:        "unlock",
+			requestType: RequestTypeUnlock,
+			items:       []ItemInfo{{Path: "/org/freedesktop/secrets/collection/login"}},
+			rule: TrustRule{
+				RequestTypes: []string{string(RequestTypeUnlock)},
+				Process:      &ProcessMatcher{Exe: "/usr/bin/browser", Direct: true},
+				Secret:       &SecretMatcher{Collection: "login"},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := NewManager(ManagerConfig{HistoryMax: 10})
+			rule, err := mgr.CreateManagedTrustRule(ManagedTrustRule{Enabled: true, TrustRule: tc.rule})
+			require.NoError(t, err)
+
+			mgr.RecordPassthrough("local", tc.items, "", tc.requestType, tc.searchAttrs, SenderInfo{
+				ProcessChain: []ProcessInfo{{Exe: "/usr/bin/browser"}},
+			})
+
+			history := mgr.History()
+			require.Len(t, history, 1)
+			require.NotNil(t, history[0].Request.Attribution)
+			assert.Equal(t, "managed_rule", history[0].Request.Attribution.Source)
+			assert.Equal(t, rule.ID, history[0].Request.Attribution.RuleID)
+		})
+	}
+}
+
+func TestCreateManagedTrustRulePreservesDisabled(t *testing.T) {
+	mgr := NewManager(ManagerConfig{HistoryMax: 10})
+	rule, err := mgr.CreateManagedTrustRule(ManagedTrustRule{Enabled: false, TrustRule: TrustRule{
+		RequestTypes: []string{string(RequestTypeGetSecret)},
+		Process:      &ProcessMatcher{Name: "legacy-*"},
+	}})
+	require.NoError(t, err)
+	assert.False(t, rule.Enabled)
+	assert.False(t, mgr.ListManagedTrustRules()[0].Enabled)
+	assert.Nil(t, mgr.checkManagedTrustRules(SenderInfo{ProcessChain: []ProcessInfo{{Name: "legacy-app"}}}, nil, RequestTypeGetSecret, nil))
+}
+
+func TestCreateManagedTrustRuleFromPending(t *testing.T) {
+	mgr := NewManager(ManagerConfig{Timeout: time.Second, HistoryMax: 10})
+	req := managedRuleRequest("/usr/bin/gh")
+	result := make(chan error, 1)
+	go func() {
+		_, err := mgr.RequireApproval(context.Background(), "client", req.Items, "", req.Type, nil, req.SenderInfo)
+		result <- err
+	}()
+	require.Eventually(t, func() bool { return mgr.PendingCount() == 1 }, time.Second, time.Millisecond)
+	pending := mgr.List()[0]
+	rule, created, err := mgr.CreateManagedTrustRuleFromRequest(pending.ID)
+	require.NoError(t, err)
+	assert.True(t, created)
+	assert.True(t, rule.Process.Direct)
+	require.NoError(t, mgr.Deny(pending.ID))
+	require.ErrorIs(t, <-result, ErrDenied)
+}
+
+func TestPersistAutoApproveRuleCreatesPermanentRule(t *testing.T) {
+	mgr := NewManager(ManagerConfig{HistoryMax: 10, AutoApproveDuration: time.Minute})
+	req := managedRuleRequest("/usr/bin/gh")
+	temporaryID := mgr.AddAutoApproveRule(req)
+	rule, err := mgr.PersistAutoApproveRule(temporaryID)
+	require.NoError(t, err)
+	assert.True(t, rule.Enabled)
+	assert.True(t, rule.Process.Direct)
+	assert.Empty(t, mgr.ListAutoApproveRules())
+	assert.Len(t, mgr.ListManagedTrustRules(), 1)
+}
+
+func TestPersistAutoApproveRuleConcurrentIsIdempotent(t *testing.T) {
+	mgr := NewManager(ManagerConfig{HistoryMax: 10, AutoApproveDuration: time.Minute})
+	temporaryID := mgr.AddAutoApproveRule(managedRuleRequest("/usr/bin/gh"))
+	const workers = 16
+	results := make(chan ManagedTrustRule, workers)
+	errors := make(chan error, workers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			rule, err := mgr.PersistAutoApproveRule(temporaryID)
+			results <- rule
+			errors <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errors)
+	for err := range errors {
+		require.NoError(t, err)
+	}
+	var persistedID string
+	for rule := range results {
+		if persistedID == "" {
+			persistedID = rule.ID
+		}
+		assert.Equal(t, persistedID, rule.ID)
+	}
+	assert.Len(t, mgr.ListManagedTrustRules(), 1)
+	assert.Empty(t, mgr.ListAutoApproveRules())
+}
+
+func TestPersistAutoApproveRuleFailureRestoresTemporaryRule(t *testing.T) {
+	storeErr := errors.New("disk unavailable")
+	mgr := NewManager(ManagerConfig{HistoryMax: 10, AutoApproveDuration: time.Minute, ManagedRuleStore: &recordingManagedStore{err: storeErr}})
+	temporaryID := mgr.AddAutoApproveRule(managedRuleRequest("/usr/bin/gh"))
+	_, err := mgr.PersistAutoApproveRule(temporaryID)
+	require.ErrorIs(t, err, storeErr)
+	assert.Empty(t, mgr.ListManagedTrustRules())
+	rules := mgr.ListAutoApproveRules()
+	require.Len(t, rules, 1)
+	assert.Equal(t, temporaryID, rules[0].ID)
+}
+
+func TestPersistAutoApproveRuleConcurrentDeleteHasSingleWinner(t *testing.T) {
+	for range 50 {
+		mgr := NewManager(ManagerConfig{HistoryMax: 10, AutoApproveDuration: time.Minute})
+		temporaryID := mgr.AddAutoApproveRule(managedRuleRequest("/usr/bin/gh"))
+		start := make(chan struct{})
+		persistResult := make(chan error, 1)
+		deleteResult := make(chan error, 1)
+		go func() {
+			<-start
+			_, err := mgr.PersistAutoApproveRule(temporaryID)
+			persistResult <- err
+		}()
+		go func() {
+			<-start
+			deleteResult <- mgr.RemoveAutoApproveRule(temporaryID)
+		}()
+		close(start)
+		persistErr := <-persistResult
+		deleteErr := <-deleteResult
+		assert.True(t, (persistErr == nil) != (deleteErr == nil), "persist=%v delete=%v", persistErr, deleteErr)
+		if persistErr == nil {
+			assert.ErrorIs(t, deleteErr, ErrNotFound)
+			assert.Len(t, mgr.ListManagedTrustRules(), 1)
+		} else {
+			assert.ErrorIs(t, persistErr, ErrNotFound)
+			require.NoError(t, deleteErr)
+			assert.Empty(t, mgr.ListManagedTrustRules())
+		}
+		assert.Empty(t, mgr.ListAutoApproveRules())
+	}
+}
+
+func TestTemporaryDecisionAttributionUsesAuthoritativeExecutable(t *testing.T) {
+	rule := &AutoApproveRule{ID: "temporary", InvokerName: "spoofed.service", InvokerExe: "/usr/bin/gh", RequestType: RequestTypeGetSecret}
+	attribution := NewTemporaryDecisionAttribution(rule)
+	require.NotNil(t, attribution.Process)
+	assert.Equal(t, "/usr/bin/gh", attribution.Process.Exe)
+	assert.True(t, attribution.Process.Direct)
+	assert.Empty(t, attribution.Process.Unit)
+}
+
+func TestTemporaryRuleRecallsPendingSearchExactlyOnce(t *testing.T) {
+	mgr := NewManager(ManagerConfig{Timeout: time.Second, HistoryMax: 10, AutoApproveDuration: time.Minute})
+	sender := SenderInfo{PID: 42, ProcessChain: []ProcessInfo{{PID: 42, Exe: "/usr/bin/gh"}}}
+	attrs := map[string]string{"service": "github"}
+	result := make(chan struct {
+		auto bool
+		err  error
+	}, 1)
+	go func() {
+		auto, err := mgr.RequireApproval(context.Background(), "client", nil, "", RequestTypeSearch, attrs, sender)
+		result <- struct {
+			auto bool
+			err  error
+		}{auto, err}
+	}()
+	require.Eventually(t, func() bool { return mgr.PendingCount() == 1 }, time.Second, time.Millisecond)
+	mgr.AddAutoApproveRule(&Request{Type: RequestTypeSearch, SearchAttributes: attrs, SenderInfo: sender})
+	got := <-result
+	require.NoError(t, got.err)
+	assert.True(t, got.auto)
+	require.Eventually(t, func() bool { return mgr.PendingCount() == 0 }, time.Second, time.Millisecond)
+	history := mgr.History()
+	require.Len(t, history, 1)
+	assert.Equal(t, ResolutionAutoApproved, history[0].Resolution)
+	assert.Equal(t, attrs, history[0].Request.Attribution.SearchAttributes)
+}
+
+func TestTemporaryRuleInstallRegistrationRace(t *testing.T) {
+	for range 100 {
+		mgr := NewManager(ManagerConfig{Timeout: 200 * time.Millisecond, HistoryMax: 10, AutoApproveDuration: time.Minute})
+		observer := &testObserver{}
+		mgr.Subscribe(observer)
+		req := managedRuleRequest("/usr/bin/gh")
+		start := make(chan struct{})
+		result := make(chan struct {
+			auto bool
+			err  error
+		}, 1)
+		added := make(chan struct{})
+		go func() {
+			<-start
+			auto, err := mgr.RequireApproval(context.Background(), "client", req.Items, "", req.Type, nil, req.SenderInfo)
+			result <- struct {
+				auto bool
+				err  error
+			}{auto, err}
+		}()
+		go func() {
+			<-start
+			mgr.AddAutoApproveRule(req)
+			close(added)
+		}()
+		close(start)
+		got := <-result
+		require.NoError(t, got.err)
+		assert.True(t, got.auto)
+		<-added
+		require.Len(t, mgr.History(), 1)
+		assert.Equal(t, ResolutionAutoApproved, mgr.History()[0].Resolution)
+		createdIndex, resolvedIndex := -1, -1
+		for i, event := range observer.Events() {
+			if event.Type == EventRequestCreated {
+				createdIndex = i
+			}
+			if event.Type == EventRequestAutoApproved {
+				resolvedIndex = i
+			}
+		}
+		assert.NotEqual(t, -1, resolvedIndex)
+		if createdIndex >= 0 {
+			assert.Less(t, createdIndex, resolvedIndex)
+		}
+	}
 }

@@ -19,7 +19,9 @@ import (
 func apiManagedRule() approval.ManagedTrustRule {
 	return approval.ManagedTrustRule{
 		ID:        "5cdad1eb-a0ef-4e61-ab62-a80a4da95da8",
+		Enabled:   true,
 		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
 		TrustRule: approval.TrustRule{
 			Name:         "gh: GitHub token",
 			Action:       "approve",
@@ -114,7 +116,7 @@ func TestManagedTrustRuleHandlers(t *testing.T) {
 		mgr.AddHistoryEntry(unsafe)
 		rec := httptest.NewRecorder()
 		h.HandleManagedTrustRuleCreateFromRequest(rec, httptest.NewRequest(http.MethodPost, "/api/v1/approval-rules/from-request", bytes.NewBufferString(`{"request_id":"unsafe"}`)))
-		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 
 	t.Run("delete", func(t *testing.T) {
@@ -195,8 +197,11 @@ func TestManagedTrustRuleRoutesRequireAuthenticationAndRouteCRUD(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	for _, request := range []*http.Request{
 		mustRequest(t, http.MethodGet, baseURL+"/api/v1/approval-rules", nil),
+		mustRequest(t, http.MethodPost, baseURL+"/api/v1/approval-rules", bytes.NewBufferString(`{"request_types":["search"],"process":{"name":"browser"}}`)),
 		mustRequest(t, http.MethodPost, baseURL+"/api/v1/approval-rules/from-request", bytes.NewBufferString(`{"request_id":"approved-1"}`)),
+		mustRequest(t, http.MethodPut, baseURL+"/api/v1/approval-rules/unknown", bytes.NewBufferString(`{}`)),
 		mustRequest(t, http.MethodDelete, baseURL+"/api/v1/approval-rules/unknown", nil),
+		mustRequest(t, http.MethodPost, baseURL+"/api/v1/auto-approve/unknown/persist", nil),
 	} {
 		resp, err := client.Do(request)
 		require.NoError(t, err)
@@ -243,6 +248,27 @@ func TestManagedTrustRuleRoutesRequireAuthenticationAndRouteCRUD(t *testing.T) {
 	resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode, string(body))
 	assert.Empty(t, mgr.ListManagedTrustRules())
+
+	req = mustRequest(t, http.MethodPost, baseURL+"/api/v1/approval-rules", bytes.NewBufferString(`{"name":"browser search","request_types":["search"],"process":{"name":"browser-*"},"search_attributes":{"service":"git*"}}`))
+	req.Header.Set("Authorization", "Bearer "+auth.Token())
+	resp, err = client.Do(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var manual approval.ManagedTrustRule
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&manual))
+	resp.Body.Close()
+	manual.Enabled = false
+	body, err = json.Marshal(manual)
+	require.NoError(t, err)
+	req = mustRequest(t, http.MethodPut, baseURL+"/api/v1/approval-rules/"+manual.ID, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+auth.Token())
+	resp, err = client.Do(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var disabled approval.ManagedTrustRule
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&disabled))
+	resp.Body.Close()
+	assert.False(t, disabled.Enabled)
 }
 
 func mustRequest(t *testing.T, method, url string, body io.Reader) *http.Request {
@@ -273,4 +299,79 @@ func TestDecisionAttributionConversionAndInjection(t *testing.T) {
 	require.Len(t, history, 1)
 	assert.Equal(t, attribution, history[0].Request.Attribution)
 	assert.Equal(t, entry.Request.SenderInfo.SystemdUnit, history[0].Request.SenderInfo.SystemdUnit)
+}
+
+func TestManagedTrustRuleCreateUpdateAndPersistHandlers(t *testing.T) {
+	mgr := approval.NewManager(approval.ManagerConfig{Timeout: time.Second, HistoryMax: 10, AutoApproveDuration: time.Minute})
+	h := testHandlers(t, mgr)
+
+	createBody := bytes.NewBufferString(`{"name":"browser","request_types":["search"],"process":{"name":"browser-*"},"search_attributes":{"service":"git*"}}`)
+	rec := httptest.NewRecorder()
+	h.HandleManagedTrustRuleCreate(rec, httptest.NewRequest(http.MethodPost, "/api/v1/approval-rules", createBody))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var created approval.ManagedTrustRule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+	assert.True(t, created.Enabled)
+
+	created.Enabled = false
+	body, err := json.Marshal(created)
+	require.NoError(t, err)
+	rec = httptest.NewRecorder()
+	h.HandleManagedTrustRuleUpdate(rec, httptest.NewRequest(http.MethodPut, "/api/v1/approval-rules/"+created.ID, bytes.NewReader(body)))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var updated approval.ManagedTrustRule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&updated))
+	assert.False(t, updated.Enabled)
+
+	temporaryID := mgr.AddAutoApproveRule(apiApprovedHistory("temporary").Request)
+	rec = httptest.NewRecorder()
+	h.HandleAutoApprovePersist(rec, httptest.NewRequest(http.MethodPost, "/api/v1/auto-approve/"+temporaryID+"/persist", nil))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, mgr.ListAutoApproveRules())
+	assert.Len(t, mgr.ListManagedTrustRules(), 2)
+
+	rec = httptest.NewRecorder()
+	h.HandleManagedTrustRuleCreate(rec, httptest.NewRequest(http.MethodPost, "/api/v1/approval-rules", bytes.NewBufferString(`{"enabled":false,"request_types":["get_secret"],"process":{"name":"disabled-*"}}`)))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var disabled approval.ManagedTrustRule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&disabled))
+	assert.False(t, disabled.Enabled)
+}
+
+func TestManagedTrustRuleCreateUpdateRejectUnknownAndTrailingJSON(t *testing.T) {
+	mgr := approval.NewManager(approval.ManagerConfig{HistoryMax: 10})
+	h := testHandlers(t, mgr)
+
+	badCreateBodies := []string{
+		`{"request_types":["get_secret"],"process":{"name":"app"},"search_atributes":{"service":"*"}}`,
+		`{"request_types":["get_secret"],"process":{"name":"app","nam":"*"}}`,
+		`{"request_types":["get_secret"],"process":{"name":"app"}} {"request_types":["get_secret"],"process":{"name":"*"}}`,
+	}
+	for _, body := range badCreateBodies {
+		rec := httptest.NewRecorder()
+		h.HandleManagedTrustRuleCreate(rec, httptest.NewRequest(http.MethodPost, "/api/v1/approval-rules", bytes.NewBufferString(body)))
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	assert.Empty(t, mgr.ListManagedTrustRules())
+
+	created, err := mgr.CreateManagedTrustRule(approval.ManagedTrustRule{Enabled: true, TrustRule: approval.TrustRule{
+		Name:         "bounded",
+		RequestTypes: []string{string(approval.RequestTypeGetSecret)},
+		Process:      &approval.ProcessMatcher{Name: "safe-app"},
+		Secret:       &approval.SecretMatcher{Collection: "login"},
+	}})
+	require.NoError(t, err)
+	badUpdateBodies := []string{
+		`{"enabled":true,"request_types":["get_secret"],"process":{"name":"*"},"secrect":{"collection":"login"}}`,
+		`{"enabled":true,"request_types":["get_secret"],"process":{"name":"*"}} null`,
+	}
+	for _, body := range badUpdateBodies {
+		rec := httptest.NewRecorder()
+		h.HandleManagedTrustRuleUpdate(rec, httptest.NewRequest(http.MethodPut, "/api/v1/approval-rules/"+created.ID, bytes.NewBufferString(body)))
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	listed := mgr.ListManagedTrustRules()
+	require.Len(t, listed, 1)
+	assert.Equal(t, "safe-app", listed[0].Process.Name)
+	assert.Equal(t, "login", listed[0].Secret.Collection)
 }

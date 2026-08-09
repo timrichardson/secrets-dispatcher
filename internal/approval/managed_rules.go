@@ -30,7 +30,9 @@ var ErrInvalidManagedRule = errors.New("invalid managed trust rule")
 // ManagedTrustRule adds persistence metadata to the existing TrustRule policy model.
 type ManagedTrustRule struct {
 	ID        string    `json:"id"`
+	Enabled   bool      `json:"enabled"`
 	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 	TrustRule
 }
 
@@ -109,16 +111,37 @@ func (s *FileManagedTrustRuleStore) Load() ([]ManagedTrustRule, error) {
 		return nil, fmt.Errorf("managed rule file exceeds %d bytes", managedRuleFileMaxSize)
 	}
 
-	var file managedRuleFile
-	if err := decodeManagedRuleJSON(data, &file); err != nil {
+	// Legacy v1 files did not have an action. Preserve a backup before
+	// normalizing them to the expanded managed-rule schema.
+	var legacy legacyManagedRuleFile
+	if err := decodeManagedRuleJSON(data, &legacy); err == nil && legacy.Version == managedRuleFileVersion {
 		migrated, migrateErr := s.migrateLegacy(data)
 		if migrateErr != nil {
-			return nil, fmt.Errorf("decode managed rule file: %w", err)
+			return nil, migrateErr
 		}
 		return migrated, nil
 	}
+
+	var file managedRuleFile
+	if err := decodeManagedRuleJSON(data, &file); err != nil {
+		return nil, fmt.Errorf("decode managed rule file: %w", err)
+	}
 	if file.Version != managedRuleFileVersion {
 		return nil, fmt.Errorf("unsupported managed rule file version %d", file.Version)
+	}
+	var presence struct {
+		Rules []map[string]json.RawMessage `json:"rules"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return nil, err
+	}
+	for i := range file.Rules {
+		if i < len(presence.Rules) {
+			if _, ok := presence.Rules[i]["enabled"]; !ok {
+				file.Rules[i].Enabled = true
+			}
+		}
+		normalizeManagedTrustRule(&file.Rules[i])
 	}
 	if err := validateManagedRules(file.Rules); err != nil {
 		return nil, err
@@ -145,11 +168,12 @@ func (s *FileManagedTrustRuleStore) migrateLegacy(data []byte) ([]ManagedTrustRu
 	}
 
 	migrated := make([]ManagedTrustRule, 0, len(legacy.Rules))
-	dropped := 0
+	unsupported := 0
 	for _, rule := range legacy.Rules {
 		converted, err := migrateLegacyManagedRule(rule)
 		if err != nil {
-			dropped++
+			unsupported++
+			slog.Warn("skipping unsupported legacy approval rule", "rule_id", rule.ID, "rule_name", rule.Name, "error", err)
 			continue
 		}
 		migrated = append(migrated, converted)
@@ -167,44 +191,27 @@ func (s *FileManagedTrustRuleStore) migrateLegacy(data []byte) ([]ManagedTrustRu
 	}
 	slog.Warn("migrated legacy approval rules",
 		"migrated", len(migrated),
-		"unsupported", dropped,
+		"unsupported", unsupported,
 		"backup", backupPath)
 	return cloneManagedTrustRules(migrated), nil
 }
 
 func migrateLegacyManagedRule(rule legacyManagedRule) (ManagedTrustRule, error) {
-	if !rule.Enabled {
-		return ManagedTrustRule{}, errors.New("disabled legacy rule")
-	}
-	if len(rule.RequestTypes) != 1 || rule.RequestTypes[0] != string(RequestTypeGetSecret) {
-		return ManagedTrustRule{}, errors.New("unsupported legacy request type")
-	}
-	if rule.Process == nil || rule.Process.Exe == "" || !filepath.IsAbs(rule.Process.Exe) {
-		return ManagedTrustRule{}, errors.New("legacy rule has no absolute executable")
-	}
-	if rule.Process.Name != "" || rule.Process.Unit != "" {
-		return ManagedTrustRule{}, errors.New("legacy process name and unit matchers are unsupported")
-	}
-	if rule.Secret == nil || rule.Secret.Collection == "" || len(rule.Secret.Attributes) == 0 {
-		return ManagedTrustRule{}, errors.New("legacy rule has no exact secret attributes")
-	}
-	if len(rule.SearchAttributes) != 0 {
-		return ManagedTrustRule{}, errors.New("legacy search attributes are unsupported")
-	}
-
-	process := *rule.Process
-	process.Direct = true
 	converted := ManagedTrustRule{
 		ID:        rule.ID,
+		Enabled:   rule.Enabled,
 		CreatedAt: rule.CreatedAt,
+		UpdatedAt: rule.UpdatedAt,
 		TrustRule: TrustRule{
-			Name:         rule.Name,
-			Action:       "approve",
-			RequestTypes: slices.Clone(rule.RequestTypes),
-			Process:      &process,
-			Secret:       rule.Secret,
+			Name:             rule.Name,
+			Action:           "approve",
+			RequestTypes:     slices.Clone(rule.RequestTypes),
+			Process:          rule.Process,
+			Secret:           rule.Secret,
+			SearchAttributes: cloneStringMap(rule.SearchAttributes),
 		},
 	}
+	normalizeManagedTrustRule(&converted)
 	if err := ValidateManagedTrustRule(&converted); err != nil {
 		return ManagedTrustRule{}, err
 	}
@@ -226,6 +233,10 @@ func preserveLegacyRuleFile(source, backup string) error {
 
 // Save atomically replaces the managed rule file with private permissions.
 func (s *FileManagedTrustRuleStore) Save(rules []ManagedTrustRule) error {
+	rules = cloneManagedTrustRules(rules)
+	for i := range rules {
+		normalizeManagedTrustRule(&rules[i])
+	}
 	if err := validateManagedRules(rules); err != nil {
 		return err
 	}
@@ -363,40 +374,42 @@ func validateManagedRules(rules []ManagedTrustRule) error {
 	return nil
 }
 
-// ValidateManagedTrustRule enforces the deliberately narrow managed-rule policy.
+// ValidateManagedTrustRule validates durable approve rules. Legacy v1 rules
+// intentionally retain broad name/unit/cwd/glob and ancestor matching; newer
+// generated rules set Process.Direct for their narrower semantics. GPG signing
+// remains excluded because signing requires the specialized resolver path.
 func ValidateManagedTrustRule(rule *ManagedTrustRule) error {
 	if rule == nil {
 		return fmt.Errorf("%w: missing rule", ErrInvalidManagedRule)
 	}
-	if _, err := uuid.Parse(rule.ID); err != nil {
+	if rule.ID == "" || strings.Contains(rule.ID, "/") {
 		return fmt.Errorf("%w: invalid id", ErrInvalidManagedRule)
 	}
 	if rule.CreatedAt.IsZero() {
 		return fmt.Errorf("%w: missing created_at", ErrInvalidManagedRule)
 	}
+	if rule.UpdatedAt.IsZero() {
+		return fmt.Errorf("%w: missing updated_at", ErrInvalidManagedRule)
+	}
+	if rule.Action == "" {
+		rule.Action = "approve"
+	}
 	if rule.Action != "approve" {
 		return fmt.Errorf("%w: action must be approve", ErrInvalidManagedRule)
 	}
-	if len(rule.RequestTypes) != 1 || rule.RequestTypes[0] != string(RequestTypeGetSecret) {
-		return fmt.Errorf("%w: only get_secret is supported", ErrInvalidManagedRule)
+	if len(rule.RequestTypes) == 0 {
+		return fmt.Errorf("%w: request_types must not be empty", ErrInvalidManagedRule)
 	}
-	if len(rule.SearchAttributes) != 0 {
-		return fmt.Errorf("%w: search_attributes are not supported", ErrInvalidManagedRule)
+	for _, requestType := range rule.RequestTypes {
+		if !validManagedRequestType(requestType) {
+			return fmt.Errorf("%w: request_type %q is not supported", ErrInvalidManagedRule, requestType)
+		}
 	}
-	if rule.Process == nil || !rule.Process.Direct || rule.Process.Exe == "" {
-		return fmt.Errorf("%w: direct executable matcher is required", ErrInvalidManagedRule)
+	if !hasManagedProcessMatcher(rule.Process) {
+		return fmt.Errorf("%w: process matcher is required", ErrInvalidManagedRule)
 	}
-	if rule.Process.Name != "" || rule.Process.Unit != "" {
-		return fmt.Errorf("%w: process name and unit are not supported", ErrInvalidManagedRule)
-	}
-	if !strings.HasPrefix(rule.Process.Exe, "/") {
+	if rule.Process.Direct && rule.Process.Exe != "" && !strings.HasPrefix(rule.Process.Exe, "/") {
 		return fmt.Errorf("%w: process executable must be absolute", ErrInvalidManagedRule)
-	}
-	if rule.Secret == nil || rule.Secret.Collection == "" || len(rule.Secret.Attributes) == 0 {
-		return fmt.Errorf("%w: collection and attributes are required", ErrInvalidManagedRule)
-	}
-	if rule.Secret.Label != "" {
-		return fmt.Errorf("%w: label matching is not supported", ErrInvalidManagedRule)
 	}
 
 	patterns := []struct {
@@ -404,64 +417,72 @@ func ValidateManagedTrustRule(rule *ManagedTrustRule) error {
 		value string
 	}{
 		{"process.exe", rule.Process.Exe},
+		{"process.name", rule.Process.Name},
 		{"process.args", rule.Process.Args},
 		{"process.cwd", rule.Process.CWD},
-		{"secret.collection", rule.Secret.Collection},
+		{"process.unit", rule.Process.Unit},
+	}
+	if rule.Secret != nil {
+		patterns = append(patterns,
+			struct{ name, value string }{"secret.collection", rule.Secret.Collection},
+			struct{ name, value string }{"secret.label", rule.Secret.Label})
 	}
 	for _, pattern := range patterns {
 		if pattern.value == "" {
 			continue
 		}
-		if err := validateLiteralPattern(pattern.value); err != nil {
+		if _, err := path.Match(pattern.value, "test"); err != nil {
 			return fmt.Errorf("%w: %s: %v", ErrInvalidManagedRule, pattern.name, err)
 		}
 	}
-	for key, value := range rule.Secret.Attributes {
+	var secretAttributes map[string]string
+	if rule.Secret != nil {
+		secretAttributes = rule.Secret.Attributes
+	}
+	for key, value := range secretAttributes {
 		if key == "" {
 			return fmt.Errorf("%w: empty secret attribute key", ErrInvalidManagedRule)
 		}
-		if err := validateLiteralPattern(value); err != nil {
+		if _, err := path.Match(value, "test"); err != nil {
 			return fmt.Errorf("%w: secret.attributes[%s]: %v", ErrInvalidManagedRule, key, err)
 		}
 	}
+	for key, value := range rule.SearchAttributes {
+		if key == "" {
+			return fmt.Errorf("%w: empty search attribute key", ErrInvalidManagedRule)
+		}
+		if _, err := path.Match(value, "test"); err != nil {
+			return fmt.Errorf("%w: search_attributes[%s]: %v", ErrInvalidManagedRule, key, err)
+		}
+	}
 	return nil
 }
 
-func validateLiteralPattern(pattern string) error {
-	if _, err := path.Match(pattern, "test"); err != nil {
-		return fmt.Errorf("invalid pattern: %w", err)
+func normalizeManagedTrustRule(rule *ManagedTrustRule) {
+	if rule.Action == "" {
+		rule.Action = "approve"
 	}
-	escaped := false
-	for _, r := range pattern {
-		if escaped {
-			escaped = false
-			continue
-		}
-		if r == '\\' {
-			escaped = true
-			continue
-		}
-		if r == '*' || r == '?' || r == '[' {
-			return errors.New("wildcards are not allowed")
-		}
+	if rule.UpdatedAt.IsZero() {
+		rule.UpdatedAt = rule.CreatedAt
 	}
-	if escaped {
-		return errors.New("trailing escape")
+}
+
+func validManagedRequestType(requestType string) bool {
+	switch RequestType(requestType) {
+	case RequestTypeGetSecret, RequestTypeSearch, RequestTypeDelete, RequestTypeWrite, RequestTypeUnlock, RequestTypeSSHSign:
+		return true
+	default:
+		return false
 	}
-	return nil
+}
+
+func hasManagedProcessMatcher(process *ProcessMatcher) bool {
+	return process != nil && (process.Exe != "" || process.Name != "" || process.CWD != "" || process.Unit != "")
 }
 
 func managedTrustRuleFromRequest(req *Request) (ManagedTrustRule, error) {
-	if req == nil || req.Type != RequestTypeGetSecret {
-		return ManagedTrustRule{}, fmt.Errorf("%w: only get_secret requests can be saved", ErrInvalidManagedRule)
-	}
-	if len(req.Items) != 1 {
-		return ManagedTrustRule{}, fmt.Errorf("%w: exactly one item is required", ErrInvalidManagedRule)
-	}
-	item := req.Items[0]
-	collection := extractCollection(item.Path)
-	if collection == "" || len(item.Attributes) == 0 {
-		return ManagedTrustRule{}, fmt.Errorf("%w: item collection and attributes are required", ErrInvalidManagedRule)
+	if req == nil || !validManagedRequestType(string(req.Type)) {
+		return ManagedTrustRule{}, fmt.Errorf("%w: request type cannot be saved", ErrInvalidManagedRule)
 	}
 	if len(req.SenderInfo.ProcessChain) == 0 {
 		return ManagedTrustRule{}, fmt.Errorf("%w: direct process information is required", ErrInvalidManagedRule)
@@ -486,23 +507,31 @@ func managedTrustRuleFromRequest(req *Request) (ManagedTrustRule, error) {
 		}
 	}
 
-	name := filepath.Base(direct.Exe) + ": " + item.Label
-	if item.Label == "" {
-		name = filepath.Base(direct.Exe) + ": " + collection
+	name := filepath.Base(direct.Exe) + " " + string(req.Type)
+	if len(req.Items) > 0 {
+		if req.Items[0].Label != "" {
+			name = filepath.Base(direct.Exe) + ": " + req.Items[0].Label
+		} else if collection := extractCollection(req.Items[0].Path); collection != "" {
+			name = filepath.Base(direct.Exe) + ": " + collection
+		}
 	}
 	rule := ManagedTrustRule{
 		ID:        uuid.New().String(),
+		Enabled:   true,
 		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
 		TrustRule: TrustRule{
 			Name:         name,
 			Action:       "approve",
-			RequestTypes: []string{string(RequestTypeGetSecret)},
+			RequestTypes: []string{string(req.Type)},
 			Process:      process,
-			Secret: &SecretMatcher{
-				Collection: globQuote(collection),
-				Attributes: quoteMap(item.Attributes),
-			},
 		},
+	}
+	if req.Type == RequestTypeSearch {
+		rule.SearchAttributes = quoteMap(req.SearchAttributes)
+	} else if len(req.Items) > 0 {
+		item := req.Items[0]
+		rule.Secret = &SecretMatcher{Collection: globQuote(extractCollection(item.Path)), Attributes: quoteMap(item.Attributes)}
 	}
 	if err := ValidateManagedTrustRule(&rule); err != nil {
 		return ManagedTrustRule{}, err
@@ -600,7 +629,8 @@ func cloneStringMap(values map[string]string) map[string]string {
 }
 
 func managedTrustRulesEqual(a, b ManagedTrustRule) bool {
-	return slices.Equal(a.RequestTypes, b.RequestTypes) &&
+	return a.Enabled == b.Enabled &&
+		slices.Equal(a.RequestTypes, b.RequestTypes) &&
 		processMatchersEqual(a.Process, b.Process) &&
 		secretMatchersEqual(a.Secret, b.Secret) &&
 		mapsEqual(a.SearchAttributes, b.SearchAttributes) &&

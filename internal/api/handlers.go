@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -27,6 +28,40 @@ type Handlers struct {
 	clientName   string
 	auth         *Auth
 	testMode     bool // When true, enables test-only endpoints
+}
+
+type managedTrustRuleInput struct {
+	ID               string                   `json:"id"`
+	Name             string                   `json:"name"`
+	Enabled          *bool                    `json:"enabled"`
+	Action           string                   `json:"action"`
+	RequestTypes     []string                 `json:"request_types"`
+	Process          *approval.ProcessMatcher `json:"process"`
+	Secret           *approval.SecretMatcher  `json:"secret"`
+	SearchAttributes map[string]string        `json:"search_attributes"`
+	CreatedAt        time.Time                `json:"created_at"`
+	UpdatedAt        time.Time                `json:"updated_at"`
+}
+
+func (input managedTrustRuleInput) managedRule() approval.ManagedTrustRule {
+	enabled := true
+	if input.Enabled != nil {
+		enabled = *input.Enabled
+	}
+	return approval.ManagedTrustRule{
+		ID:        input.ID,
+		Enabled:   enabled,
+		CreatedAt: input.CreatedAt,
+		UpdatedAt: input.UpdatedAt,
+		TrustRule: approval.TrustRule{
+			Name:             input.Name,
+			Action:           input.Action,
+			RequestTypes:     input.RequestTypes,
+			Process:          input.Process,
+			Secret:           input.Secret,
+			SearchAttributes: input.SearchAttributes,
+		},
+	}
 }
 
 // NewHandlers creates new API handlers for single-socket mode.
@@ -289,6 +324,32 @@ func (h *Handlers) HandleAutoApproveDelete(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, ActionResponse{Status: "deleted"})
 }
 
+// HandleAutoApprovePersist handles POST /api/v1/auto-approve/{id}/persist.
+func (h *Handlers) HandleAutoApprovePersist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/auto-approve/"), "/persist")
+	if id == "" || strings.Contains(id, "/") {
+		writeError(w, "invalid rule ID", http.StatusBadRequest)
+		return
+	}
+	rule, err := h.resolver.PersistAutoApproveRule(id)
+	if err != nil {
+		switch {
+		case errors.Is(err, approval.ErrNotFound):
+			writeError(w, "rule not found", http.StatusNotFound)
+		case errors.Is(err, approval.ErrInvalidManagedRule):
+			writeError(w, err.Error(), http.StatusBadRequest)
+		default:
+			writeError(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, rule)
+}
+
 // HandleManagedTrustRuleList handles GET /api/v1/approval-rules.
 func (h *Handlers) HandleManagedTrustRuleList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -301,6 +362,30 @@ func (h *Handlers) HandleManagedTrustRuleList(w http.ResponseWriter, r *http.Req
 		rules = []approval.ManagedTrustRule{}
 	}
 	writeJSON(w, rules)
+}
+
+// HandleManagedTrustRuleCreate handles POST /api/v1/approval-rules.
+func (h *Handlers) HandleManagedTrustRuleCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var input managedTrustRuleInput
+	if err := decodeStrictJSON(r.Body, &input); err != nil {
+		writeError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	requested := input.managedRule()
+	rule, err := h.resolver.CreateManagedTrustRule(requested)
+	if err != nil {
+		if errors.Is(err, approval.ErrInvalidManagedRule) {
+			writeError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, rule)
 }
 
 // HandleManagedTrustRuleCreateFromRequest handles POST /api/v1/approval-rules/from-request.
@@ -364,6 +449,38 @@ func (h *Handlers) HandleManagedTrustRuleDelete(w http.ResponseWriter, r *http.R
 	}
 
 	writeJSON(w, ActionResponse{Status: "deleted"})
+}
+
+// HandleManagedTrustRuleUpdate handles PUT /api/v1/approval-rules/{id}.
+func (h *Handlers) HandleManagedTrustRuleUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/approval-rules/")
+	if id == "" || strings.Contains(id, "/") {
+		writeError(w, "invalid rule ID", http.StatusBadRequest)
+		return
+	}
+	var input managedTrustRuleInput
+	if err := decodeStrictJSON(r.Body, &input); err != nil {
+		writeError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	requested := input.managedRule()
+	rule, err := h.resolver.UpdateManagedTrustRule(id, requested)
+	if err != nil {
+		switch {
+		case errors.Is(err, approval.ErrNotFound):
+			writeError(w, "rule not found", http.StatusNotFound)
+		case errors.Is(err, approval.ErrInvalidManagedRule):
+			writeError(w, err.Error(), http.StatusBadRequest)
+		default:
+			writeError(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, rule)
 }
 
 // HandleLog handles GET /api/v1/log.
@@ -455,6 +572,21 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		http.Error(w, `{"error": "failed to encode response"}`, http.StatusInternalServerError)
 	}
+}
+
+func decodeStrictJSON(reader io.Reader, target any) error {
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return errors.New("request body contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func writeJSONStatus(w http.ResponseWriter, status int, v any) {

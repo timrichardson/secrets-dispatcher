@@ -69,7 +69,7 @@ type WSMessage struct {
 	// For auto_approve_rule_added / auto_approve_rule_removed
 	AutoApproveRule *approval.AutoApproveRule `json:"auto_approve_rule,omitempty"`
 
-	// For approval_rule_added / approval_rule_removed
+	// For approval_rule_added / approval_rule_updated / approval_rule_removed
 	ManagedTrustRule *approval.ManagedTrustRule `json:"approval_rule,omitempty"`
 }
 
@@ -218,8 +218,9 @@ func (wsc *wsConnection) OnEvent(event approval.Event) {
 			HistoryEntry: &entry,
 		})
 	case approval.EventRequestAutoApproved:
-		// GPG sign auto-approvals carry signature data that the thin client needs.
-		if event.Request.Type == approval.RequestTypeGPGSign {
+		// Recalled requests were previously announced as pending and therefore
+		// need an explicit removal. GPG auto-approvals also carry signature data.
+		if event.Recalled || event.Request.Type == approval.RequestTypeGPGSign {
 			msg := WSMessage{
 				Type:   "request_resolved",
 				ID:     event.Request.ID,
@@ -256,6 +257,11 @@ func (wsc *wsConnection) OnEvent(event approval.Event) {
 	case approval.EventManagedTrustRuleAdded:
 		msgs = append(msgs, WSMessage{
 			Type:             "approval_rule_added",
+			ManagedTrustRule: event.ManagedRule,
+		})
+	case approval.EventManagedTrustRuleUpdated:
+		msgs = append(msgs, WSMessage{
+			Type:             "approval_rule_updated",
 			ManagedTrustRule: event.ManagedRule,
 		})
 	case approval.EventManagedTrustRuleRemoved:
