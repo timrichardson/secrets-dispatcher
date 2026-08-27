@@ -471,17 +471,6 @@ func cloneManagedTrustRule(rule ManagedTrustRule) ManagedTrustRule {
 	return rule
 }
 
-func cloneStringMap(values map[string]string) map[string]string {
-	if values == nil {
-		return nil
-	}
-	cloned := make(map[string]string, len(values))
-	for key, value := range values {
-		cloned[key] = value
-	}
-	return cloned
-}
-
 func managedTrustRulesEqual(a, b ManagedTrustRule) bool {
 	return slices.Equal(a.RequestTypes, b.RequestTypes) &&
 		processMatchersEqual(a.Process, b.Process) &&
