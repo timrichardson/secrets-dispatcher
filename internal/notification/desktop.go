@@ -21,6 +21,9 @@ const (
 	notifyDest      = "org.freedesktop.Notifications"
 	notifyPath      = "/org/freedesktop/Notifications"
 	notifyInterface = "org.freedesktop.Notifications"
+	portalDest      = "org.freedesktop.portal.Desktop"
+	portalPath      = "/org/freedesktop/portal/desktop"
+	portalOpenURI   = "org.freedesktop.portal.OpenURI.OpenURI"
 )
 
 // Notifier defines the interface for sending desktop notifications.
@@ -396,13 +399,52 @@ func NewHandler(notifier Notifier, approver Approver, baseURL string, showPIDs b
 		showPIDs:            showPIDs,
 		autoApproveDuration: autoApproveDuration,
 		notificationDelay:   notificationDelay,
-		openURL:             func(u string) { exec.Command("xdg-open", u).Start() },
-		notifications:       make(map[string]uint32),
-		requests:            make(map[uint32]string),
-		requestData:         make(map[string]*approval.Request),
-		pending:             newDelayGroup(),
-		cancelledRequests:   make(map[string]cancelledEntry),
+		openURL: func(u string) {
+			go func() {
+				if err := openDesktopURL(u); err != nil {
+					slog.Error("failed to open notification admin URL", "error", err)
+				}
+			}()
+		},
+		notifications:     make(map[string]uint32),
+		requests:          make(map[uint32]string),
+		requestData:       make(map[string]*approval.Request),
+		pending:           newDelayGroup(),
+		cancelledRequests: make(map[string]cancelledEntry),
 	}
+}
+
+var startDesktopURL = func(rawURL string) error {
+	return exec.Command("xdg-open", rawURL).Start()
+}
+
+func openDesktopURL(rawURL string) error {
+	// Match `secrets-dispatcher login`: xdg-open is the proven path from the
+	// user-service environment. A portal OpenURI call is asynchronous, so a
+	// successful method return only means the request was accepted, not that a
+	// browser was actually opened.
+	xdgErr := startDesktopURL(rawURL)
+	if xdgErr == nil {
+		return nil
+	}
+
+	conn, portalErr := dbus.ConnectSessionBus()
+	if portalErr == nil {
+		call := conn.Object(portalDest, dbus.ObjectPath(portalPath)).Call(
+			portalOpenURI,
+			0,
+			"", // No parent window: the request originates from a notification action.
+			rawURL,
+			map[string]dbus.Variant{},
+		)
+		portalErr = call.Err
+		conn.Close()
+		if portalErr == nil {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("xdg-open: %w; desktop portal: %v", xdgErr, portalErr)
 }
 
 // ListenActions reads from the actions channel and resolves requests.
